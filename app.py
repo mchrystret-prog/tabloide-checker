@@ -4,6 +4,7 @@ from pypdf import PdfReader
 from rapidfuzz import fuzz
 from io import BytesIO
 from streamlit_cookies_manager import EncryptedCookieManager
+import unicodedata
 
 st.set_page_config(
     page_title="Tabloide Checker",
@@ -11,7 +12,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.0.0"
+VERSAO = "1.1.0"
 
 # =========================
 # COOKIES
@@ -144,6 +145,19 @@ xlsx_file = st.file_uploader("Selecione a grade de ofertas XLSX", type=["xlsx"])
 pdf_file = st.file_uploader("Selecione o PDF exportado do InDesign", type=["pdf"])
 
 
+def remover_acentos(texto):
+    texto = str(texto)
+    texto = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in texto if not unicodedata.combining(c))
+
+
+def texto_busca(texto):
+    if pd.isna(texto):
+        return ""
+
+    return remover_acentos(str(texto)).upper().strip()
+
+
 def formatar_preco(valor):
     if pd.isna(valor):
         return ""
@@ -167,6 +181,46 @@ def limpar_texto(texto):
     )
 
 
+def aplicar_tipo_blocos(df):
+    """
+    Identifica blocos dentro da grade:
+    - NORMAL
+    - EXCLUÍDO
+    - INCLUÍDO
+
+    A regra acompanha as linhas separadoras da planilha.
+    Quando encontra EXCLUÍDOS, todos os produtos abaixo viram EXCLUÍDO.
+    Quando encontra INCLUÍDOS, todos os produtos abaixo viram INCLUÍDO.
+    Quando encontra outro BOX, volta para NORMAL.
+    """
+
+    tipo_atual = "NORMAL"
+    tipos = []
+
+    for _, row in df.iterrows():
+        texto_linha = texto_busca(" ".join([str(v) for v in row.values if not pd.isna(v)]))
+
+        if "EXCLUID" in texto_linha:
+            tipo_atual = "EXCLUÍDO"
+            tipos.append("SEPARADOR")
+            continue
+
+        if "INCLUID" in texto_linha:
+            tipo_atual = "INCLUÍDO"
+            tipos.append("SEPARADOR")
+            continue
+
+        if "BOX" in texto_linha and "EXCLUID" not in texto_linha and "INCLUID" not in texto_linha:
+            tipo_atual = "NORMAL"
+            tipos.append("SEPARADOR")
+            continue
+
+        tipos.append(tipo_atual)
+
+    df["Tipo"] = tipos
+    return df
+
+
 def ler_aba_agencia(arquivo):
     df = pd.read_excel(
         arquivo,
@@ -175,6 +229,8 @@ def ler_aba_agencia(arquivo):
     )
 
     df["Aba"] = "Agência"
+    df = aplicar_tipo_blocos(df)
+
     return df
 
 
@@ -194,6 +250,8 @@ def ler_aba_flv(arquivo):
     df["PREÇO"] = df_raw.iloc[:, 4]
     df["COOPERMAIS"] = df_raw.iloc[:, 5]
     df["Aba"] = "FLV"
+
+    df = aplicar_tipo_blocos(df)
 
     return df
 
@@ -220,6 +278,7 @@ def carregar_xlsx(arquivo):
 
     colunas = [
         "Aba",
+        "Tipo",
         "Código",
         "Descrição",
         "Embalagem",
@@ -231,24 +290,36 @@ def carregar_xlsx(arquivo):
     df = df_original[colunas].copy()
     df = df.dropna(subset=["Descrição"])
 
+    df = df[df["Tipo"] != "SEPARADOR"].copy()
+
+    # Ignora boxes, títulos e linhas sem preço regular numérico.
     df = df[
         pd.to_numeric(df["PREÇO"], errors="coerce").notna()
     ].copy()
 
     total_antes = len(df)
 
+    # Ignora itens internos, exceto quando estiverem no bloco EXCLUÍDO.
     ignorados = df[
-        df["Descrição"]
-        .astype(str)
-        .str.upper()
-        .str.contains("INTERNO", na=False)
+        (df["Tipo"] != "EXCLUÍDO")
+        & (
+            df["Descrição"]
+            .astype(str)
+            .str.upper()
+            .str.contains("INTERNO", na=False)
+        )
     ].copy()
 
     df = df[
-        ~df["Descrição"]
-        .astype(str)
-        .str.upper()
-        .str.contains("INTERNO", na=False)
+        ~(
+            (df["Tipo"] != "EXCLUÍDO")
+            & (
+                df["Descrição"]
+                .astype(str)
+                .str.upper()
+                .str.contains("INTERNO", na=False)
+            )
+        )
     ].copy()
 
     total_ignorados = len(ignorados)
@@ -355,6 +426,27 @@ def conferir(df, paginas):
     resultados = []
 
     for _, row in df.iterrows():
+        tipo_item = row["Tipo"]
+
+        if tipo_item == "EXCLUÍDO":
+            resultados.append({
+                "Status": "EXCLUÍDO",
+                "Motivo principal": "Produto excluído",
+                "Página provável": "-",
+                "Aba": row["Aba"],
+                "Tipo": tipo_item,
+                "Código": row["Código"],
+                "Descrição": row["Descrição"],
+                "Embalagem": row["Embalagem"],
+                "Unid.Medida": row["Unid.Medida"],
+                "Preço Regular XLSX": row["preco_regular_fmt"],
+                "CooperMais XLSX": row["coopermais_fmt"],
+                "Regra especial": "Produto listado no bloco EXCLUÍDOS",
+                "Score descrição": "-",
+                "Apontamentos": "Produto excluído"
+            })
+            continue
+
         descricao = row["descricao_limpa"]
         unidade = row["unidade_limpa"]
         embalagem = row["embalagem_limpa"]
@@ -392,6 +484,9 @@ def conferir(df, paginas):
 
         apontamentos = []
 
+        if tipo_item == "INCLUÍDO":
+            apontamentos.append("Produto incluído")
+
         if status_descricao == "REVISAR":
             apontamentos.append("Revisar descrição")
 
@@ -412,7 +507,7 @@ def conferir(df, paginas):
 
         if any("não encontrada" in item or "não encontrado" in item for item in apontamentos):
             status_final = "DIVERGÊNCIA"
-        elif apontamentos:
+        elif status_descricao == "REVISAR":
             status_final = "REVISAR"
         else:
             status_final = "OK"
@@ -423,11 +518,15 @@ def conferir(df, paginas):
             apontamentos
         )
 
+        if tipo_item == "INCLUÍDO" and status_final == "OK":
+            motivo_principal = "Produto incluído conferido"
+
         resultados.append({
             "Status": status_final,
             "Motivo principal": motivo_principal,
             "Página provável": pagina,
             "Aba": row["Aba"],
+            "Tipo": tipo_item,
             "Código": row["Código"],
             "Descrição": row["Descrição"],
             "Embalagem": row["Embalagem"],
@@ -452,6 +551,9 @@ def destacar_linhas(row):
 
     if row["Status"] == "REVISAR":
         return ["background-color: #5c4b1f"] * len(row)
+
+    if row["Status"] == "EXCLUÍDO":
+        return ["background-color: #3a3a3a"] * len(row)
 
     return [""] * len(row)
 
@@ -484,6 +586,11 @@ def gerar_excel(resultado, ignorados):
             "font_color": "#9C6500"
         })
 
+        excluido_format = workbook.add_format({
+            "bg_color": "#D9D9D9",
+            "font_color": "#595959"
+        })
+
         for col_num, value in enumerate(resultado.columns.values):
             worksheet.write(0, col_num, value, header_format)
             worksheet.set_column(col_num, col_num, 24)
@@ -494,6 +601,9 @@ def gerar_excel(resultado, ignorados):
 
             if status == "REVISAR":
                 worksheet.set_row(row_num, None, revisar_format)
+
+            if status == "EXCLUÍDO":
+                worksheet.set_row(row_num, None, excluido_format)
 
     output.seek(0)
     return output
@@ -516,6 +626,8 @@ if st.button("Conferir tabloide"):
         ok = len(resultado[resultado["Status"] == "OK"])
         revisar = len(resultado[resultado["Status"] == "REVISAR"])
         divergencias = len(resultado[resultado["Status"] == "DIVERGÊNCIA"])
+        excluidos = len(resultado[resultado["Status"] == "EXCLUÍDO"])
+        incluidos = len(resultado[resultado["Tipo"] == "INCLUÍDO"])
 
         st.session_state.resultado = resultado
         st.session_state.ignorados = ignorados
@@ -525,7 +637,9 @@ if st.button("Conferir tabloide"):
             "total": total,
             "ok": ok,
             "revisar": revisar,
-            "divergencias": divergencias
+            "divergencias": divergencias,
+            "excluidos": excluidos,
+            "incluidos": incluidos
         }
 
 
@@ -534,20 +648,28 @@ if st.session_state.resultado is not None:
     ignorados = st.session_state.ignorados
     metricas = st.session_state.metricas
 
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
 
-    col1.metric("Itens válidos na grade", metricas["total_antes"])
-    col2.metric("Itens internos ignorados", metricas["total_ignorados"])
-    col3.metric("Produtos conferidos", metricas["total"])
-    col4.metric("Produtos OK", metricas["ok"])
+    col1.metric("Itens na grade", metricas["total_antes"])
+    col2.metric("Internos ignorados", metricas["total_ignorados"])
+    col3.metric("Conferidos", metricas["total"])
+    col4.metric("OK", metricas["ok"])
     col5.metric("Revisar", metricas["revisar"])
     col6.metric("Divergências", metricas["divergencias"])
+    col7.metric("Excluídos", metricas["excluidos"])
+    col8.metric("Incluídos", metricas["incluidos"])
 
     st.subheader("Resultado da conferência")
 
     modo_visualizacao = st.radio(
         "Visualização",
-        ["Somente divergências", "Revisar + divergências", "Todos os produtos"],
+        [
+            "Somente divergências",
+            "Revisar + divergências",
+            "Excluídos",
+            "Incluídos",
+            "Todos os produtos"
+        ],
         horizontal=True
     )
 
@@ -555,6 +677,10 @@ if st.session_state.resultado is not None:
         tabela = resultado[resultado["Status"] == "DIVERGÊNCIA"]
     elif modo_visualizacao == "Revisar + divergências":
         tabela = resultado[resultado["Status"].isin(["REVISAR", "DIVERGÊNCIA"])]
+    elif modo_visualizacao == "Excluídos":
+        tabela = resultado[resultado["Status"] == "EXCLUÍDO"]
+    elif modo_visualizacao == "Incluídos":
+        tabela = resultado[resultado["Tipo"] == "INCLUÍDO"]
     else:
         tabela = resultado
 
