@@ -3,12 +3,41 @@ import pandas as pd
 from pypdf import PdfReader
 from rapidfuzz import fuzz
 from io import BytesIO
+from streamlit_cookies_manager import EncryptedCookieManager
 
 st.set_page_config(
     page_title="Tabloide Checker",
     page_icon="🛒",
     layout="wide"
 )
+
+VERSAO = "1.0.0"
+
+# =========================
+# COOKIES
+# =========================
+
+def obter_senha_cookie():
+    try:
+        return st.secrets["cookie"]["senha"]
+    except Exception:
+        return None
+
+
+senha_cookie = obter_senha_cookie()
+
+if not senha_cookie:
+    st.error("Configure a chave de cookie nos Secrets do Streamlit.")
+    st.stop()
+
+cookies = EncryptedCookieManager(
+    prefix="tabloide_checker_",
+    password=senha_cookie
+)
+
+if not cookies.ready():
+    st.stop()
+
 
 # =========================
 # LOGIN
@@ -38,13 +67,28 @@ def tela_login():
         if usuario in usuarios and senha == usuarios[usuario]:
             st.session_state.logado = True
             st.session_state.usuario = usuario
+
+            cookies["usuario"] = usuario
+            cookies.save()
+
             st.rerun()
         else:
             st.error("Usuário ou senha inválidos.")
 
 
+usuarios = obter_usuarios()
+
 if "logado" not in st.session_state:
     st.session_state.logado = False
+
+if "usuario" not in st.session_state:
+    st.session_state.usuario = ""
+
+usuario_cookie = cookies.get("usuario")
+
+if usuario_cookie in usuarios and not st.session_state.logado:
+    st.session_state.logado = True
+    st.session_state.usuario = usuario_cookie
 
 if not st.session_state.logado:
     tela_login()
@@ -54,8 +98,6 @@ if not st.session_state.logado:
 # =========================
 # APP PRINCIPAL
 # =========================
-
-VERSAO = "1.0.0"
 
 st.title("🛒 Tabloide Checker")
 
@@ -67,20 +109,24 @@ Utilize o sistema para validar automaticamente preços, descrições e ofertas d
 """
 )
 
-st.caption(f"Versão {VERSAO}")
-
 with st.sidebar:
-
     st.success(f"✅ Logado como: {st.session_state.usuario}")
 
     st.divider()
 
     st.caption("Tabloide Checker")
-    st.caption("Versão 1.0.0")
+    st.caption(f"Versão {VERSAO}")
 
     if st.button("Sair"):
         st.session_state.logado = False
         st.session_state.usuario = ""
+
+        try:
+            del cookies["usuario"]
+            cookies.save()
+        except Exception:
+            pass
+
         st.rerun()
 
 
