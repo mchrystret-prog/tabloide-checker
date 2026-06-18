@@ -10,8 +10,61 @@ st.set_page_config(
     layout="wide"
 )
 
+# =========================
+# LOGIN
+# =========================
+
+def obter_usuarios():
+    try:
+        return dict(st.secrets["usuarios"])
+    except Exception:
+        return {}
+
+
+def tela_login():
+    st.title("🛒 Tabloide Checker")
+    st.write("Acesso restrito")
+
+    usuarios = obter_usuarios()
+
+    if not usuarios:
+        st.error("Nenhum usuário configurado. Configure os usuários no Secrets do Streamlit.")
+        st.stop()
+
+    usuario = st.text_input("Usuário")
+    senha = st.text_input("Senha", type="password")
+
+    if st.button("Entrar"):
+        if usuario in usuarios and senha == usuarios[usuario]:
+            st.session_state.logado = True
+            st.session_state.usuario = usuario
+            st.rerun()
+        else:
+            st.error("Usuário ou senha inválidos.")
+
+
+if "logado" not in st.session_state:
+    st.session_state.logado = False
+
+if not st.session_state.logado:
+    tela_login()
+    st.stop()
+
+
+# =========================
+# APP PRINCIPAL
+# =========================
+
 st.title("🛒 Tabloide Checker")
 st.write("Conferência automática de tabloide: XLSX x PDF")
+
+with st.sidebar:
+    st.write(f"Usuário: **{st.session_state.usuario}**")
+    if st.button("Sair"):
+        st.session_state.logado = False
+        st.session_state.usuario = ""
+        st.rerun()
+
 
 if "resultado" not in st.session_state:
     st.session_state.resultado = None
@@ -114,14 +167,12 @@ def carregar_xlsx(arquivo):
     df = df_original[colunas].copy()
     df = df.dropna(subset=["Descrição"])
 
-    # Ignora boxes, títulos e separadores sem preço regular numérico.
     df = df[
         pd.to_numeric(df["PREÇO"], errors="coerce").notna()
     ].copy()
 
     total_antes = len(df)
 
-    # Ignora itens internos.
     ignorados = df[
         df["Descrição"]
         .astype(str)
@@ -212,7 +263,7 @@ def classificar_descricao(score):
 def definir_motivo_principal(score, status_descricao, apontamentos):
     texto = " ".join(apontamentos).upper()
 
-    if score < 65:
+    if score < 60:
         return "Produto da grade provavelmente não está no PDF"
 
     if status_descricao == "DIVERGÊNCIA":
