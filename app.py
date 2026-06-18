@@ -55,11 +55,29 @@ if not st.session_state.logado:
 # APP PRINCIPAL
 # =========================
 
+VERSAO = "1.0.0"
+
 st.title("🛒 Tabloide Checker")
-st.write("Conferência automática de tabloide: XLSX x PDF")
+
+st.markdown(
+    f"""
+### 👋 Bem-vindo, {st.session_state.usuario.capitalize()}!
+
+Utilize o sistema para validar automaticamente preços, descrições e ofertas do tabloide antes da publicação.
+"""
+)
+
+st.caption(f"Versão {VERSAO}")
 
 with st.sidebar:
-    st.write(f"Usuário: **{st.session_state.usuario}**")
+
+    st.success(f"✅ Logado como: {st.session_state.usuario}")
+
+    st.divider()
+
+    st.caption("Tabloide Checker")
+    st.caption("Versão 1.0.0")
+
     if st.button("Sair"):
         st.session_state.logado = False
         st.session_state.usuario = ""
