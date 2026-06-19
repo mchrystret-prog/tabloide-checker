@@ -676,6 +676,8 @@ if st.button("Conferir tabloide"):
 
         with st.spinner("Comparando dados..."):
             resultado = conferir(df, paginas)
+        resultado["Página provável"] = resultado["Página provável"].astype(str)
+        resultado["Score descrição"] = resultado["Score descrição"].astype(str)
 
         total = len(resultado)
         ok = len(resultado[resultado["Status"] == "OK"])
@@ -742,7 +744,7 @@ if st.session_state.resultado is not None:
 
     tabela = tabela.copy()
     tabela["Página provável"] = tabela["Página provável"].astype(str)
-    
+
     st.dataframe(
         tabela.style.apply(destacar_linhas, axis=1),
         use_container_width=True
