@@ -769,35 +769,35 @@ if st.session_state.resultado is not None:
                 use_container_width=True
             )
 
-    arquivo_excel_completo = gerar_excel(
-        resultado,
-        ignorados,
-        metricas,
-        st.session_state.usuario
-    )
-
-    arquivo_excel_alertas = gerar_excel(
-        resultado,
-        ignorados,
-        metricas,
-        st.session_state.usuario,
-        somente_alertas=True
-    )
-
-    col_a, col_b = st.columns(2)
-
-    with col_a:
-        st.download_button(
-            label="📥 Baixar relatório completo",
-            data=arquivo_excel_completo,
-            file_name="relatorio_completo.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        arquivo_excel_completo = gerar_excel(
+            resultado,
+            ignorados,
+            metricas,
+            st.session_state.usuario
         )
 
-    with col_b:
-        st.download_button(
-            label="⚠️ Baixar pontos de atenção",
-            data=arquivo_excel_alertas,
-            file_name="relatorio_divergencias.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        arquivo_excel_alertas = gerar_excel(
+            resultado,
+            ignorados,
+            metricas,
+            st.session_state.usuario,
+            somente_alertas=True
         )
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            st.download_button(
+                label="📥 Baixar relatório completo",
+                data=arquivo_excel_completo,
+                file_name="relatorio_completo.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        with col_b:
+            st.download_button(
+                label="⚠️ Baixar pontos de atenção",
+                data=arquivo_excel_alertas,
+                file_name="relatorio_divergencias.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
