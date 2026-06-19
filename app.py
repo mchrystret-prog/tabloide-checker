@@ -335,6 +335,41 @@ def carregar_xlsx(arquivo):
 
 
 def carregar_pdf(arquivo):
+    import fitz
+from PIL import Image
+
+
+def gerar_preview_paginas(pdf_file):
+    pdf_file.seek(0)
+
+    pdf_bytes = pdf_file.read()
+
+    doc = fitz.open(
+        stream=pdf_bytes,
+        filetype="pdf"
+    )
+
+    previews = {}
+
+    for pagina_num in range(len(doc)):
+        page = doc.load_page(pagina_num)
+
+        pix = page.get_pixmap(
+            matrix=fitz.Matrix(2, 2),
+            alpha=False
+        )
+
+        img = Image.fromarray(
+            pix.samples.reshape(
+                pix.height,
+                pix.width,
+                pix.n
+            )
+        )
+
+        previews[pagina_num + 1] = img
+
+    return previews
     reader = PdfReader(arquivo)
     paginas = []
 
@@ -616,8 +651,11 @@ if st.button("Conferir tabloide"):
         with st.spinner("Lendo XLSX..."):
             df, total_antes, total_ignorados, ignorados = carregar_xlsx(xlsx_file)
 
-        with st.spinner("Lendo PDF..."):
-            paginas = carregar_pdf(pdf_file)
+with st.spinner("Lendo PDF..."):
+    paginas = carregar_pdf(pdf_file)
+
+with st.spinner("Gerando pré-visualizações..."):
+    previews_pdf = gerar_preview_paginas(pdf_file)
 
         with st.spinner("Comparando dados..."):
             resultado = conferir(df, paginas)
@@ -630,6 +668,7 @@ if st.button("Conferir tabloide"):
         incluidos = len(resultado[resultado["Tipo"] == "INCLUÍDO"])
 
         st.session_state.resultado = resultado
+    st.session_state.previews_pdf = previews_pdf
         st.session_state.ignorados = ignorados
         st.session_state.metricas = {
             "total_antes": total_antes,
@@ -688,7 +727,33 @@ if st.session_state.resultado is not None:
         tabela.style.apply(destacar_linhas, axis=1),
         use_container_width=True
     )
+if "previews_pdf" in st.session_state:
 
+    paginas_disponiveis = sorted(
+        tabela["Página provável"]
+        .dropna()
+        .unique()
+    )
+
+    paginas_disponiveis = [
+        p for p in paginas_disponiveis
+        if str(p).isdigit()
+    ]
+
+    if paginas_disponiveis:
+
+        pagina_escolhida = st.selectbox(
+            "Visualizar página do PDF",
+            paginas_disponiveis
+        )
+
+        if pagina_escolhida in st.session_state.previews_pdf:
+
+            st.image(
+                st.session_state.previews_pdf[pagina_escolhida],
+                caption=f"Página {pagina_escolhida}",
+                use_container_width=True
+            )
     arquivo_excel = gerar_excel(resultado, ignorados)
 
     st.download_button(
