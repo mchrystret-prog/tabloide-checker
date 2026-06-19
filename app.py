@@ -702,53 +702,53 @@ if st.session_state.resultado is not None:
         horizontal=True
     )
 
-        if modo_visualizacao == "Somente divergências":
-            tabela = resultado[resultado["Status"] == "DIVERGÊNCIA"]
-        elif modo_visualizacao == "Revisar + divergências":
-            tabela = resultado[resultado["Status"].isin(["REVISAR", "DIVERGÊNCIA"])]
-        elif modo_visualizacao == "Excluídos":
-            tabela = resultado[resultado["Status"] == "EXCLUÍDO"]
-        elif modo_visualizacao == "Incluídos":
-            tabela = resultado[resultado["Tipo"] == "INCLUÍDO"]
-        else:
-            tabela = resultado
+    if modo_visualizacao == "Somente divergências":
+        tabela = resultado[resultado["Status"] == "DIVERGÊNCIA"]
+    elif modo_visualizacao == "Revisar + divergências":
+        tabela = resultado[resultado["Status"].isin(["REVISAR", "DIVERGÊNCIA"])]
+    elif modo_visualizacao == "Excluídos":
+        tabela = resultado[resultado["Status"] == "EXCLUÍDO"]
+    elif modo_visualizacao == "Incluídos":
+        tabela = resultado[resultado["Tipo"] == "INCLUÍDO"]
+    else:
+        tabela = resultado
 
-        st.dataframe(
-            tabela.style.apply(destacar_linhas, axis=1),
-            use_container_width=True
-        )
+    st.dataframe(
+        tabela.style.apply(destacar_linhas, axis=1),
+        use_container_width=True
+    )
 
-        if st.session_state.previews_pdf is not None:
-            paginas_disponiveis = []
+    if st.session_state.previews_pdf is not None:
+        paginas_disponiveis = []
 
-            for p in tabela["Página provável"].dropna().unique():
-                try:
-                    paginas_disponiveis.append(int(p))
-                except:
-                    pass
+        for p in tabela["Página provável"].dropna().unique():
+            try:
+                paginas_disponiveis.append(int(p))
+            except Exception:
+                pass
 
-            paginas_disponiveis = sorted(set(paginas_disponiveis))
+        paginas_disponiveis = sorted(set(paginas_disponiveis))
 
-            if paginas_disponiveis:
-                st.subheader("Visualizar página do PDF")
+        if paginas_disponiveis:
+            st.subheader("Visualizar página do PDF")
 
-                pagina_escolhida = st.selectbox(
-                    "Selecione a página",
-                    paginas_disponiveis
+            pagina_escolhida = st.selectbox(
+                "Selecione a página",
+                paginas_disponiveis
+            )
+
+            if pagina_escolhida in st.session_state.previews_pdf:
+                st.image(
+                    st.session_state.previews_pdf[pagina_escolhida],
+                    caption=f"Página {pagina_escolhida}",
+                    use_container_width=True
                 )
 
-                if pagina_escolhida in st.session_state.previews_pdf:
-                    st.image(
-                        st.session_state.previews_pdf[pagina_escolhida],
-                        caption=f"Página {pagina_escolhida}",
-                        use_container_width=True
-                    )
+    arquivo_excel = gerar_excel(resultado, ignorados)
 
-        arquivo_excel = gerar_excel(resultado, ignorados)
-
-        st.download_button(
-            label="Baixar relatório Excel",
-            data=arquivo_excel,
-            file_name="relatorio_conferencia_tabloide.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    st.download_button(
+        label="Baixar relatório Excel",
+        data=arquivo_excel,
+        file_name="relatorio_conferencia_tabloide.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
