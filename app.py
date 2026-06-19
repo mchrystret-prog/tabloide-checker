@@ -143,8 +143,8 @@ if "ignorados" not in st.session_state:
 if "metricas" not in st.session_state:
     st.session_state.metricas = None
 
-if "previews_pdf" not in st.session_state:
-    st.session_state.previews_pdf = None
+if "pdf_bytes" not in st.session_state:
+    st.session_state.pdf_bytes = None
 
 
 xlsx_file = st.file_uploader("Selecione a grade de ofertas XLSX", type=["xlsx"])
@@ -342,37 +342,25 @@ def carregar_pdf(arquivo):
     return paginas
 
 
-def gerar_preview_paginas(pdf_file):
-    pdf_file.seek(0)
-    pdf_bytes = pdf_file.read()
-    pdf_file.seek(0)
+def gerar_preview_pagina(pdf_bytes, numero_pagina):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    doc = fitz.open(
-        stream=pdf_bytes,
-        filetype="pdf"
+    page = doc.load_page(numero_pagina - 1)
+
+    pix = page.get_pixmap(
+        matrix=fitz.Matrix(1.3, 1.3),
+        alpha=False
     )
 
-    previews = {}
-
-    for pagina_num in range(len(doc)):
-        page = doc.load_page(pagina_num)
-
-        pix = page.get_pixmap(
-            matrix=fitz.Matrix(2, 2),
-            alpha=False
-        )
-
-        img = Image.frombytes(
-            "RGB",
-            [pix.width, pix.height],
-            pix.samples
-        )
-
-        previews[pagina_num + 1] = img
+    img = Image.frombytes(
+        "RGB",
+        [pix.width, pix.height],
+        pix.samples
+    )
 
     doc.close()
 
-    return previews
+    return img
 
 
 def preco_na_pagina(preco, texto_pagina):
@@ -671,8 +659,9 @@ if st.button("Conferir tabloide"):
         with st.spinner("Lendo PDF..."):
             paginas = carregar_pdf(pdf_file)
 
-        with st.spinner("Gerando pré-visualizações..."):
-            previews_pdf = gerar_preview_paginas(pdf_file)
+        pdf_file.seek(0)
+        st.session_state.pdf_bytes = pdf_file.read()
+        pdf_file.seek(0)
 
         with st.spinner("Comparando dados..."):
             resultado = conferir(df, paginas)
@@ -687,7 +676,6 @@ if st.button("Conferir tabloide"):
         incluidos = len(resultado[resultado["Tipo"] == "INCLUÍDO"])
 
         st.session_state.resultado = resultado
-        st.session_state.previews_pdf = previews_pdf
         st.session_state.ignorados = ignorados
         st.session_state.metricas = {
             "total_antes": total_antes,
@@ -750,7 +738,7 @@ if st.session_state.resultado is not None:
         use_container_width=True
     )
 
-    if st.session_state.previews_pdf is not None:
+    if st.session_state.pdf_bytes is not None:
         paginas_disponiveis = []
 
         for p in tabela["Página provável"].dropna().unique():
@@ -769,12 +757,17 @@ if st.session_state.resultado is not None:
                 paginas_disponiveis
             )
 
-            if pagina_escolhida in st.session_state.previews_pdf:
-                st.image(
-                    st.session_state.previews_pdf[pagina_escolhida],
-                    caption=f"Página {pagina_escolhida}",
-                    use_container_width=True
+            with st.spinner("Carregando página do PDF..."):
+                imagem_pagina = gerar_preview_pagina(
+                    st.session_state.pdf_bytes,
+                    pagina_escolhida
                 )
+
+            st.image(
+                imagem_pagina,
+                caption=f"Página {pagina_escolhida}",
+                use_container_width=True
+            )
 
     arquivo_excel_completo = gerar_excel(
         resultado,
