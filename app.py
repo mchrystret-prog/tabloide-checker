@@ -5,6 +5,8 @@ from rapidfuzz import fuzz
 from io import BytesIO
 from streamlit_cookies_manager import EncryptedCookieManager
 import unicodedata
+import fitz
+from PIL import Image
 
 st.set_page_config(
     page_title="Tabloide Checker",
@@ -12,7 +14,8 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.1.0"
+VERSAO = "1.2.0"
+
 
 # =========================
 # COOKIES
@@ -140,6 +143,9 @@ if "ignorados" not in st.session_state:
 if "metricas" not in st.session_state:
     st.session_state.metricas = None
 
+if "previews_pdf" not in st.session_state:
+    st.session_state.previews_pdf = None
+
 
 xlsx_file = st.file_uploader("Selecione a grade de ofertas XLSX", type=["xlsx"])
 pdf_file = st.file_uploader("Selecione o PDF exportado do InDesign", type=["pdf"])
@@ -182,18 +188,6 @@ def limpar_texto(texto):
 
 
 def aplicar_tipo_blocos(df):
-    """
-    Identifica blocos dentro da grade:
-    - NORMAL
-    - EXCLUÍDO
-    - INCLUÍDO
-
-    A regra acompanha as linhas separadoras da planilha.
-    Quando encontra EXCLUÍDOS, todos os produtos abaixo viram EXCLUÍDO.
-    Quando encontra INCLUÍDOS, todos os produtos abaixo viram INCLUÍDO.
-    Quando encontra outro BOX, volta para NORMAL.
-    """
-
     tipo_atual = "NORMAL"
     tipos = []
 
@@ -292,14 +286,12 @@ def carregar_xlsx(arquivo):
 
     df = df[df["Tipo"] != "SEPARADOR"].copy()
 
-    # Ignora boxes, títulos e linhas sem preço regular numérico.
     df = df[
         pd.to_numeric(df["PREÇO"], errors="coerce").notna()
     ].copy()
 
     total_antes = len(df)
 
-    # Ignora itens internos, exceto quando estiverem no bloco EXCLUÍDO.
     ignorados = df[
         (df["Tipo"] != "EXCLUÍDO")
         & (
@@ -335,14 +327,25 @@ def carregar_xlsx(arquivo):
 
 
 def carregar_pdf(arquivo):
-    import fitz
-from PIL import Image
+    reader = PdfReader(arquivo)
+    paginas = []
+
+    for i, page in enumerate(reader.pages):
+        texto = page.extract_text() or ""
+        texto_limpo = limpar_texto(texto)
+
+        paginas.append({
+            "pagina": i + 1,
+            "texto": texto_limpo
+        })
+
+    return paginas
 
 
 def gerar_preview_paginas(pdf_file):
     pdf_file.seek(0)
-
     pdf_bytes = pdf_file.read()
+    pdf_file.seek(0)
 
     doc = fitz.open(
         stream=pdf_bytes,
@@ -359,30 +362,17 @@ def gerar_preview_paginas(pdf_file):
             alpha=False
         )
 
-        img = Image.fromarray(
-            pix.samples.reshape(
-                pix.height,
-                pix.width,
-                pix.n
-            )
+        img = Image.frombytes(
+            "RGB",
+            [pix.width, pix.height],
+            pix.samples
         )
 
         previews[pagina_num + 1] = img
 
+    doc.close()
+
     return previews
-    reader = PdfReader(arquivo)
-    paginas = []
-
-    for i, page in enumerate(reader.pages):
-        texto = page.extract_text() or ""
-        texto_limpo = limpar_texto(texto)
-
-        paginas.append({
-            "pagina": i + 1,
-            "texto": texto_limpo
-        })
-
-    return paginas
 
 
 def preco_na_pagina(preco, texto_pagina):
@@ -727,33 +717,34 @@ if st.session_state.resultado is not None:
         tabela.style.apply(destacar_linhas, axis=1),
         use_container_width=True
     )
-if "previews_pdf" in st.session_state:
 
-    paginas_disponiveis = sorted(
-        tabela["Página provável"]
-        .dropna()
-        .unique()
-    )
-
-    paginas_disponiveis = [
-        p for p in paginas_disponiveis
-        if str(p).isdigit()
-    ]
-
-    if paginas_disponiveis:
-
-        pagina_escolhida = st.selectbox(
-            "Visualizar página do PDF",
-            paginas_disponiveis
+    if st.session_state.previews_pdf is not None:
+        paginas_disponiveis = sorted(
+            tabela["Página provável"]
+            .dropna()
+            .unique()
         )
 
-        if pagina_escolhida in st.session_state.previews_pdf:
+        paginas_disponiveis = [
+            int(p) for p in paginas_disponiveis
+            if str(p).isdigit()
+        ]
 
-            st.image(
-                st.session_state.previews_pdf[pagina_escolhida],
-                caption=f"Página {pagina_escolhida}",
-                use_container_width=True
+        if paginas_disponiveis:
+            st.subheader("Visualizar página do PDF")
+
+            pagina_escolhida = st.selectbox(
+                "Selecione a página",
+                paginas_disponiveis
             )
+
+            if pagina_escolhida in st.session_state.previews_pdf:
+                st.image(
+                    st.session_state.previews_pdf[pagina_escolhida],
+                    caption=f"Página {pagina_escolhida}",
+                    use_container_width=True
+                )
+
     arquivo_excel = gerar_excel(resultado, ignorados)
 
     st.download_button(

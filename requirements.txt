@@ -6,3 +6,4 @@ rapidfuzz
 xlsxwriter
 streamlit-cookies-manager
 pymupdf
+pillow
