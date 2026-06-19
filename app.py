@@ -702,7 +702,7 @@ if st.session_state.resultado is not None:
         horizontal=True
     )
 
-    if modo_visualizacao == "Somente divergências":
+     if modo_visualizacao == "Somente divergências":
         tabela = resultado[resultado["Status"] == "DIVERGÊNCIA"]
     elif modo_visualizacao == "Revisar + divergências":
         tabela = resultado[resultado["Status"].isin(["REVISAR", "DIVERGÊNCIA"])]
@@ -721,13 +721,13 @@ if st.session_state.resultado is not None:
     if st.session_state.previews_pdf is not None:
         paginas_disponiveis = []
 
-for p in tabela["Página provável"].dropna().unique():
-    try:
-        paginas_disponiveis.append(int(p))
-    except:
-        pass
+        for p in tabela["Página provável"].dropna().unique():
+            try:
+                paginas_disponiveis.append(int(p))
+            except:
+                pass
 
-paginas_disponiveis = sorted(set(paginas_disponiveis))
+        paginas_disponiveis = sorted(set(paginas_disponiveis))
 
         if paginas_disponiveis:
             st.subheader("Visualizar página do PDF")
