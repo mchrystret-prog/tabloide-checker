@@ -651,11 +651,11 @@ if st.button("Conferir tabloide"):
         with st.spinner("Lendo XLSX..."):
             df, total_antes, total_ignorados, ignorados = carregar_xlsx(xlsx_file)
 
-with st.spinner("Lendo PDF..."):
-    paginas = carregar_pdf(pdf_file)
+        with st.spinner("Lendo PDF..."):
+            paginas = carregar_pdf(pdf_file)
 
-with st.spinner("Gerando pré-visualizações..."):
-    previews_pdf = gerar_preview_paginas(pdf_file)
+        with st.spinner("Gerando pré-visualizações..."):
+            previews_pdf = gerar_preview_paginas(pdf_file)
 
         with st.spinner("Comparando dados..."):
             resultado = conferir(df, paginas)
@@ -668,7 +668,7 @@ with st.spinner("Gerando pré-visualizações..."):
         incluidos = len(resultado[resultado["Tipo"] == "INCLUÍDO"])
 
         st.session_state.resultado = resultado
-    st.session_state.previews_pdf = previews_pdf
+        st.session_state.previews_pdf = previews_pdf
         st.session_state.ignorados = ignorados
         st.session_state.metricas = {
             "total_antes": total_antes,
