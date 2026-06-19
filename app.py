@@ -740,6 +740,9 @@ if st.session_state.resultado is not None:
     else:
         tabela = resultado
 
+    tabela = tabela.copy()
+    tabela["Página provável"] = tabela["Página provável"].astype(str)
+    
     st.dataframe(
         tabela.style.apply(destacar_linhas, axis=1),
         use_container_width=True
