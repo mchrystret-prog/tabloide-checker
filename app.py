@@ -585,47 +585,38 @@ def destacar_linhas(row):
 
 def gerar_excel(resultado, ignorados, metricas, usuario, somente_alertas=False):
     output = BytesIO()
+
     if somente_alertas:
-            resultado_exportar = resultado[
-        resultado["Status"].isin(
-            ["REVISAR", "DIVERGÊNCIA"]
-        )
-    ]
+        resultado_exportar = resultado[
+            resultado["Status"].isin(["REVISAR", "DIVERGÊNCIA"])
+        ].copy()
     else:
         resultado_exportar = resultado.copy()
+
+    resumo = pd.DataFrame(
+        [
+            ["Usuário", usuario],
+            ["Versão", VERSAO],
+            ["Itens na grade", metricas["total_antes"]],
+            ["Internos ignorados", metricas["total_ignorados"]],
+            ["Conferidos", metricas["total"]],
+            ["OK", metricas["ok"]],
+            ["Revisar", metricas["revisar"]],
+            ["Divergências", metricas["divergencias"]],
+            ["Excluídos", metricas["excluidos"]],
+            ["Incluídos", metricas["incluidos"]],
+        ],
+        columns=["Indicador", "Valor"]
+    )
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        resultado_exportar.to_excel(
-    writer,
-    index=False,
-    sheet_name="Conferência"
-)
+        resumo.to_excel(writer, index=False, sheet_name="Resumo")
+        resultado_exportar.to_excel(writer, index=False, sheet_name="Conferência")
 
         if ignorados is not None and not ignorados.empty:
             ignorados.to_excel(writer, index=False, sheet_name="Itens Ignorados")
 
         workbook = writer.book
-        worksheet = writer.sheets["Conferência"]
-        resumo = pd.DataFrame(
-    [
-        ["Usuário", usuario],
-        ["Versão", VERSAO],
-        ["Itens na grade", metricas["total_antes"]],
-        ["Internos ignorados", metricas["total_ignorados"]],
-        ["Conferidos", metricas["total"]],
-        ["OK", metricas["ok"]],
-        ["Revisar", metricas["revisar"]],
-        ["Divergências", metricas["divergencias"]],
-        ["Excluídos", metricas["excluidos"]],
-        ["Incluídos", metricas["incluidos"]],
-    ],
-    columns=["Indicador", "Valor"]
-)
-
-resumo.to_excel(
-    writer,
-    index=False,
-    sheet_name="Resumo"
-)
 
         header_format = workbook.add_format({
             "bold": True,
@@ -648,19 +639,23 @@ resumo.to_excel(
             "font_color": "#595959"
         })
 
-        for col_num, value in enumerate(resultado.columns.values):
+        worksheet = writer.sheets["Conferência"]
+
+        for col_num, value in enumerate(resultado_exportar.columns.values):
             worksheet.write(0, col_num, value, header_format)
             worksheet.set_column(col_num, col_num, 24)
 
-        for row_num, status in enumerate(resultado["Status"], start=1):
+        for row_num, status in enumerate(resultado_exportar["Status"], start=1):
             if status == "DIVERGÊNCIA":
                 worksheet.set_row(row_num, None, erro_format)
-
-            if status == "REVISAR":
+            elif status == "REVISAR":
                 worksheet.set_row(row_num, None, revisar_format)
-
-            if status == "EXCLUÍDO":
+            elif status == "EXCLUÍDO":
                 worksheet.set_row(row_num, None, excluido_format)
+
+        resumo_sheet = writer.sheets["Resumo"]
+        resumo_sheet.set_column(0, 0, 25)
+        resumo_sheet.set_column(1, 1, 25)
 
     output.seek(0)
     return output
