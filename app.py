@@ -583,17 +583,49 @@ def destacar_linhas(row):
     return [""] * len(row)
 
 
-def gerar_excel(resultado, ignorados):
+def gerar_excel(resultado, ignorados, metricas, usuario, somente_alertas=False):
     output = BytesIO()
-
+    if somente_alertas:
+            resultado_exportar = resultado[
+        resultado["Status"].isin(
+            ["REVISAR", "DIVERGÊNCIA"]
+        )
+    ]
+    else:
+        resultado_exportar = resultado.copy()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        resultado.to_excel(writer, index=False, sheet_name="Conferência")
+        resultado_exportar.to_excel(
+    writer,
+    index=False,
+    sheet_name="Conferência"
+)
 
         if ignorados is not None and not ignorados.empty:
             ignorados.to_excel(writer, index=False, sheet_name="Itens Ignorados")
 
         workbook = writer.book
         worksheet = writer.sheets["Conferência"]
+        resumo = pd.DataFrame(
+    [
+        ["Usuário", usuario],
+        ["Versão", VERSAO],
+        ["Itens na grade", metricas["total_antes"]],
+        ["Internos ignorados", metricas["total_ignorados"]],
+        ["Conferidos", metricas["total"]],
+        ["OK", metricas["ok"]],
+        ["Revisar", metricas["revisar"]],
+        ["Divergências", metricas["divergencias"]],
+        ["Excluídos", metricas["excluidos"]],
+        ["Incluídos", metricas["incluidos"]],
+    ],
+    columns=["Indicador", "Valor"]
+)
+
+resumo.to_excel(
+    writer,
+    index=False,
+    sheet_name="Resumo"
+)
 
         header_format = workbook.add_format({
             "bold": True,
@@ -744,11 +776,35 @@ if st.session_state.resultado is not None:
                     use_container_width=True
                 )
 
-    arquivo_excel = gerar_excel(resultado, ignorados)
+arquivo_excel_completo = gerar_excel(
+    resultado,
+    ignorados,
+    metricas,
+    st.session_state.usuario
+)
 
+arquivo_excel_alertas = gerar_excel(
+    resultado,
+    ignorados,
+    metricas,
+    st.session_state.usuario,
+    somente_alertas=True
+)
+
+col_a, col_b = st.columns(2)
+
+with col_a:
     st.download_button(
-        label="Baixar relatório Excel",
-        data=arquivo_excel,
-        file_name="relatorio_conferencia_tabloide.xlsx",
+        label="📥 Baixar relatório completo",
+        data=arquivo_excel_completo,
+        file_name="relatorio_completo.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+with col_b:
+    st.download_button(
+        label="⚠️ Baixar pontos de atenção",
+        data=arquivo_excel_alertas,
+        file_name="relatorio_divergencias.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
