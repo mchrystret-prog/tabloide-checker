@@ -719,16 +719,15 @@ if st.session_state.resultado is not None:
     )
 
     if st.session_state.previews_pdf is not None:
-        paginas_disponiveis = sorted(
-            tabela["Página provável"]
-            .dropna()
-            .unique()
-        )
+        paginas_disponiveis = []
 
-        paginas_disponiveis = [
-            int(p) for p in paginas_disponiveis
-            if str(p).isdigit()
-        ]
+for p in tabela["Página provável"].dropna().unique():
+    try:
+        paginas_disponiveis.append(int(p))
+    except:
+        pass
+
+paginas_disponiveis = sorted(set(paginas_disponiveis))
 
         if paginas_disponiveis:
             st.subheader("Visualizar página do PDF")
