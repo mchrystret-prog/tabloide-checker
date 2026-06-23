@@ -728,8 +728,8 @@ if st.button("Conferir tabloide"):
         }
 salvar_historico(
     st.session_state.usuario,
-    xlsx_file.name,
-    pdf_file.name,
+    xlsx_file.name if xlsx_file else "",
+    pdf_file.name if pdf_file else "",
     st.session_state.metricas
 )
 
