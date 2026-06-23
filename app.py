@@ -98,7 +98,7 @@ if not st.session_state.logado:
 st.session_state.perfil = obter_perfil(st.session_state.usuario)
 
 with st.sidebar:
-    st.success(f"Logado como: {st.session_state.usuario}"✅) 
+    st.success(f"Logado como: {st.session_state.usuario}✅") 
     st.caption(f"Perfil: {st.session_state.perfil}")
     st.divider()
     st.caption("Tabloide Checker")
