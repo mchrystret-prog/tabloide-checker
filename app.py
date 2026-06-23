@@ -682,6 +682,18 @@ if pagina == "📋 Histórico":
 
     if os.path.exists("historico.csv"):
         historico = pd.read_csv("historico.csv")
+        historico["data_hora"] = pd.to_datetime(
+        historico["data_hora"],
+        format="%d/%m/%Y %H:%M:%S",
+        errors="coerce"
+        )
+        historico = historico.sort_values(
+        by="data_hora",
+        ascending=False
+        )
+
+        historico = historico.reset_index(drop=True)
+
 
         total_conferencias = len(historico)
         total_divergencias = historico["divergencias"].sum()
@@ -696,11 +708,16 @@ if pagina == "📋 Histórico":
         c4.metric("Usuários", usuarios_ativos)
 
         historico = historico.iloc[::-1].reset_index(drop=True)
+        historico_exibir = historico.copy()
 
+        historico_exibir["data_hora"] = (
+        historico_exibir["data_hora"]
+        .dt.strftime("%d/%m/%Y %H:%M:%S")
+)
         st.dataframe(
-            historico,
+            historico_exibir,
             use_container_width=True
-        )
+)
 
     else:
         st.info("Nenhuma conferência registrada ainda.")
