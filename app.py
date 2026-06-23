@@ -46,6 +46,11 @@ def obter_usuarios():
         return dict(st.secrets["usuarios"])
     except Exception:
         return {}
+def obter_perfil(usuario):
+    try:
+        return st.secrets["perfis"].get(usuario, "USUARIO")
+    except Exception:
+        return "USUARIO"
 
 
 def tela_login():
@@ -90,9 +95,11 @@ if not st.session_state.logado:
     tela_login()
     st.stop()
 
+st.session_state.perfil = obter_perfil(st.session_state.usuario)
 
 with st.sidebar:
     st.success(f"✅ Logado como: {st.session_state.usuario}")
+    st.caption(f"👤 Perfil: {st.session_state.perfil}")
     st.divider()
     st.caption("Tabloide Checker")
     st.caption(f"Versão {VERSAO}")
