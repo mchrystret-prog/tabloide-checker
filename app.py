@@ -106,6 +106,13 @@ with st.sidebar:
     st.divider()
     st.caption("Tabloide Checker")
     st.caption(f"Versão {VERSAO}")
+    pagina = st.sidebar.radio(
+    "Menu",
+    [
+        "🏠 Conferência",
+        "📋 Histórico"
+    ]
+)
 
     if st.button("Sair"):
         st.session_state.logado = False
@@ -706,9 +713,30 @@ if st.button("Conferir tabloide"):
             pdf_file.name if pdf_file else "",
             st.session_state.metricas
         )
+if pagina == "📋 Histórico":
 
+    st.header("📋 Histórico de Conferências")
 
-if st.session_state.resultado is not None:
+    if os.path.exists("historico.csv"):
+
+        historico = pd.read_csv("historico.csv")
+
+        st.metric(
+            "Total de Conferências",
+            len(historico)
+        )
+
+        st.dataframe(
+            historico.sort_index(ascending=False),
+            use_container_width=True
+        )
+
+    else:
+        st.info("Nenhuma conferência registrada ainda.")
+
+    st.stop()
+
+if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
     resultado = st.session_state.resultado
     ignorados = st.session_state.ignorados
     metricas = st.session_state.metricas
@@ -803,17 +831,6 @@ if st.session_state.resultado is not None:
         somente_alertas=True
     )
 
-    st.divider()
-
-    if os.path.exists("historico.csv"):
-        st.subheader("📋 Histórico de Conferências")
-
-        historico = pd.read_csv("historico.csv")
-
-        st.dataframe(
-            historico.sort_index(ascending=False),
-            use_container_width=True
-        )
 
     col_a, col_b = st.columns(2)
 
