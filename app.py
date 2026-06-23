@@ -16,7 +16,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.3.0"
+VERSAO = "1.3.1"
 
 
 def obter_senha_cookie():
@@ -91,28 +91,19 @@ if not st.session_state.logado:
     st.stop()
 
 
-st.title("🛒 Tabloide Checker")
-
-st.markdown(
-    f"""
-### 👋 Bem-vindo, {st.session_state.usuario.capitalize()}!
-
-Utilize o sistema para validar automaticamente preços, descrições e ofertas do tabloide antes da publicação.
-"""
-)
-
 with st.sidebar:
     st.success(f"✅ Logado como: {st.session_state.usuario}")
     st.divider()
     st.caption("Tabloide Checker")
     st.caption(f"Versão {VERSAO}")
-    pagina = st.sidebar.radio(
-    "Menu",
-    [
-        "🏠 Conferência",
-        "📋 Histórico"
-    ]
-)
+
+    pagina = st.radio(
+        "Menu",
+        [
+            "🏠 Conferência",
+            "📋 Histórico"
+        ]
+    )
 
     if st.button("Sair"):
         st.session_state.logado = False
@@ -127,6 +118,17 @@ with st.sidebar:
         st.rerun()
 
 
+st.title("🛒 Tabloide Checker")
+
+st.markdown(
+    f"""
+### 👋 Bem-vindo, {st.session_state.usuario.capitalize()}!
+
+Utilize o sistema para validar automaticamente preços, descrições e ofertas do tabloide antes da publicação.
+"""
+)
+
+
 if "resultado" not in st.session_state:
     st.session_state.resultado = None
 
@@ -138,10 +140,6 @@ if "metricas" not in st.session_state:
 
 if "pdf_bytes" not in st.session_state:
     st.session_state.pdf_bytes = None
-
-
-xlsx_file = st.file_uploader("Selecione a grade de ofertas XLSX", type=["xlsx"])
-pdf_file = st.file_uploader("Selecione o PDF exportado do InDesign", type=["pdf"])
 
 
 def remover_acentos(texto):
@@ -667,67 +665,28 @@ def salvar_historico(usuario, xlsx_nome, pdf_nome, metricas):
     historico.to_csv(arquivo, index=False)
 
 
-if st.button("Conferir tabloide"):
-    if not xlsx_file or not pdf_file:
-        st.warning("Envie o XLSX e o PDF para iniciar a conferência.")
-    else:
-        with st.spinner("Lendo XLSX..."):
-            df, total_antes, total_ignorados, ignorados = carregar_xlsx(xlsx_file)
-
-        with st.spinner("Lendo PDF..."):
-            paginas = carregar_pdf(pdf_file)
-
-        pdf_file.seek(0)
-        st.session_state.pdf_bytes = pdf_file.read()
-        pdf_file.seek(0)
-
-        with st.spinner("Comparando dados..."):
-            resultado = conferir(df, paginas)
-
-        resultado["Página provável"] = resultado["Página provável"].astype(str)
-        resultado["Score descrição"] = resultado["Score descrição"].astype(str)
-
-        total = len(resultado)
-        ok = len(resultado[resultado["Status"] == "OK"])
-        revisar = len(resultado[resultado["Status"] == "REVISAR"])
-        divergencias = len(resultado[resultado["Status"] == "DIVERGÊNCIA"])
-        excluidos = len(resultado[resultado["Status"] == "EXCLUÍDO"])
-        incluidos = len(resultado[resultado["Tipo"] == "INCLUÍDO"])
-
-        st.session_state.resultado = resultado
-        st.session_state.ignorados = ignorados
-        st.session_state.metricas = {
-            "total_antes": total_antes,
-            "total_ignorados": total_ignorados,
-            "total": total,
-            "ok": ok,
-            "revisar": revisar,
-            "divergencias": divergencias,
-            "excluidos": excluidos,
-            "incluidos": incluidos
-        }
-
-        salvar_historico(
-            st.session_state.usuario,
-            xlsx_file.name if xlsx_file else "",
-            pdf_file.name if pdf_file else "",
-            st.session_state.metricas
-        )
 if pagina == "📋 Histórico":
-
     st.header("📋 Histórico de Conferências")
 
     if os.path.exists("historico.csv"):
-
         historico = pd.read_csv("historico.csv")
 
-        st.metric(
-            "Total de Conferências",
-            len(historico)
-        )
+        total_conferencias = len(historico)
+        total_divergencias = historico["divergencias"].sum()
+        total_revisar = historico["revisar"].sum()
+        usuarios_ativos = historico["usuario"].nunique()
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Conferências", total_conferencias)
+        c2.metric("Divergências", int(total_divergencias))
+        c3.metric("Itens Revisar", int(total_revisar))
+        c4.metric("Usuários", usuarios_ativos)
+
+        historico = historico.iloc[::-1].reset_index(drop=True)
 
         st.dataframe(
-            historico.sort_index(ascending=False),
+            historico,
             use_container_width=True
         )
 
@@ -735,6 +694,62 @@ if pagina == "📋 Histórico":
         st.info("Nenhuma conferência registrada ainda.")
 
     st.stop()
+
+
+xlsx_file = None
+pdf_file = None
+
+if pagina == "🏠 Conferência":
+    xlsx_file = st.file_uploader("Selecione a grade de ofertas XLSX", type=["xlsx"])
+    pdf_file = st.file_uploader("Selecione o PDF exportado do InDesign", type=["pdf"])
+
+    if st.button("Conferir tabloide"):
+        if not xlsx_file or not pdf_file:
+            st.warning("Envie o XLSX e o PDF para iniciar a conferência.")
+        else:
+            with st.spinner("Lendo XLSX..."):
+                df, total_antes, total_ignorados, ignorados = carregar_xlsx(xlsx_file)
+
+            with st.spinner("Lendo PDF..."):
+                paginas = carregar_pdf(pdf_file)
+
+            pdf_file.seek(0)
+            st.session_state.pdf_bytes = pdf_file.read()
+            pdf_file.seek(0)
+
+            with st.spinner("Comparando dados..."):
+                resultado = conferir(df, paginas)
+
+            resultado["Página provável"] = resultado["Página provável"].astype(str)
+            resultado["Score descrição"] = resultado["Score descrição"].astype(str)
+
+            total = len(resultado)
+            ok = len(resultado[resultado["Status"] == "OK"])
+            revisar = len(resultado[resultado["Status"] == "REVISAR"])
+            divergencias = len(resultado[resultado["Status"] == "DIVERGÊNCIA"])
+            excluidos = len(resultado[resultado["Status"] == "EXCLUÍDO"])
+            incluidos = len(resultado[resultado["Tipo"] == "INCLUÍDO"])
+
+            st.session_state.resultado = resultado
+            st.session_state.ignorados = ignorados
+            st.session_state.metricas = {
+                "total_antes": total_antes,
+                "total_ignorados": total_ignorados,
+                "total": total,
+                "ok": ok,
+                "revisar": revisar,
+                "divergencias": divergencias,
+                "excluidos": excluidos,
+                "incluidos": incluidos
+            }
+
+            salvar_historico(
+                st.session_state.usuario,
+                xlsx_file.name if xlsx_file else "",
+                pdf_file.name if pdf_file else "",
+                st.session_state.metricas
+            )
+
 
 if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
     resultado = st.session_state.resultado
@@ -830,7 +845,6 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
         st.session_state.usuario,
         somente_alertas=True
     )
-
 
     col_a, col_b = st.columns(2)
 
