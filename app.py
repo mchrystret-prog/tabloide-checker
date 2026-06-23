@@ -120,11 +120,23 @@ with st.sidebar:
 
 st.title("🛒 Tabloide Checker")
 
+if pagina == "🏠 Conferência":
+    descricao = (
+        "Utilize esta área para validar automaticamente preços e "
+        "descrições do tabloide antes da publicação."
+    )
+
+elif pagina == "📋 Histórico":
+    descricao = (
+        "Consulte o histórico de conferências realizadas, "
+        "acompanhe divergências encontradas e monitore a evolução das validações."
+    )
+
 st.markdown(
     f"""
-### 👋 Bem-vindo, {st.session_state.usuario.capitalize()}!
+### Bem-vindo, {st.session_state.usuario.capitalize()}👋 
 
-Utilize o sistema para validar automaticamente preços, descrições e ofertas do tabloide antes da publicação.
+{descricao}
 """
 )
 
