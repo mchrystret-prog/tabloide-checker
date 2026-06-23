@@ -828,9 +828,9 @@ if st.session_state.resultado is not None:
             somente_alertas=True
         )
 
-        col_a, col_b = st.columns(2)
+col_a, col_b = st.columns(2)
 
-        st.divider()
+st.divider()
 
 if os.path.exists("historico.csv"):
     st.subheader("📋 Histórico de Conferências")
