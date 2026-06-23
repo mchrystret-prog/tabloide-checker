@@ -842,7 +842,7 @@ if os.path.exists("historico.csv"):
         use_container_width=True
     )
 
-        with col_a:
+with col_a:
             st.download_button(
                 label="📥 Baixar relatório completo",
                 data=arquivo_excel_completo,
@@ -850,7 +850,7 @@ if os.path.exists("historico.csv"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-        with col_b:
+with col_b:
             st.download_button(
                 label="⚠️ Baixar pontos de atenção",
                 data=arquivo_excel_alertas,
