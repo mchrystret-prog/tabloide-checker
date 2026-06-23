@@ -16,12 +16,8 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.2.0"
+VERSAO = "1.3.0"
 
-
-# =========================
-# COOKIES
-# =========================
 
 def obter_senha_cookie():
     try:
@@ -44,10 +40,6 @@ cookies = EncryptedCookieManager(
 if not cookies.ready():
     st.stop()
 
-
-# =========================
-# LOGIN
-# =========================
 
 def obter_usuarios():
     try:
@@ -73,10 +65,8 @@ def tela_login():
         if usuario in usuarios and senha == usuarios[usuario]:
             st.session_state.logado = True
             st.session_state.usuario = usuario
-
             cookies["usuario"] = usuario
             cookies.save()
-
             st.rerun()
         else:
             st.error("Usuário ou senha inválidos.")
@@ -101,10 +91,6 @@ if not st.session_state.logado:
     st.stop()
 
 
-# =========================
-# APP PRINCIPAL
-# =========================
-
 st.title("🛒 Tabloide Checker")
 
 st.markdown(
@@ -117,9 +103,7 @@ Utilize o sistema para validar automaticamente preços, descrições e ofertas d
 
 with st.sidebar:
     st.success(f"✅ Logado como: {st.session_state.usuario}")
-
     st.divider()
-
     st.caption("Tabloide Checker")
     st.caption(f"Versão {VERSAO}")
 
@@ -172,7 +156,7 @@ def formatar_preco(valor):
 
     try:
         return f"{float(valor):.2f}".replace(".", ",")
-    except:
+    except Exception:
         return str(valor).replace(".", ",")
 
 
@@ -238,7 +222,6 @@ def ler_aba_flv(arquivo):
     )
 
     df = pd.DataFrame()
-
     df["Código"] = df_raw.iloc[:, 0]
     df["Descrição"] = df_raw.iloc[:, 1]
     df["Embalagem"] = df_raw.iloc[:, 2]
@@ -285,7 +268,6 @@ def carregar_xlsx(arquivo):
 
     df = df_original[colunas].copy()
     df = df.dropna(subset=["Descrição"])
-
     df = df[df["Tipo"] != "SEPARADOR"].copy()
 
     df = df[
@@ -576,43 +558,6 @@ def destacar_linhas(row):
 def gerar_excel(resultado, ignorados, metricas, usuario, somente_alertas=False):
     output = BytesIO()
 
-def salvar_historico(
-    usuario,
-    xlsx_nome,
-    pdf_nome,
-    metricas
-):
-    arquivo = "historico.csv"
-
-    nova_linha = pd.DataFrame(
-        [{
-            "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-            "usuario": usuario,
-            "xlsx": xlsx_nome,
-            "pdf": pdf_nome,
-            "itens_grade": metricas["total_antes"],
-            "ok": metricas["ok"],
-            "revisar": metricas["revisar"],
-            "divergencias": metricas["divergencias"],
-            "excluidos": metricas["excluidos"],
-            "incluidos": metricas["incluidos"]
-        }]
-    )
-
-    if os.path.exists(arquivo):
-        historico = pd.read_csv(arquivo)
-        historico = pd.concat(
-            [historico, nova_linha],
-            ignore_index=True
-        )
-    else:
-        historico = nova_linha
-
-    historico.to_csv(
-        arquivo,
-        index=False
-    )
-
     if somente_alertas:
         resultado_exportar = resultado[
             resultado["Status"].isin(["REVISAR", "DIVERGÊNCIA"])
@@ -688,6 +633,33 @@ def salvar_historico(
     return output
 
 
+def salvar_historico(usuario, xlsx_nome, pdf_nome, metricas):
+    arquivo = "historico.csv"
+
+    nova_linha = pd.DataFrame(
+        [{
+            "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            "usuario": usuario,
+            "xlsx": xlsx_nome,
+            "pdf": pdf_nome,
+            "itens_grade": metricas["total_antes"],
+            "ok": metricas["ok"],
+            "revisar": metricas["revisar"],
+            "divergencias": metricas["divergencias"],
+            "excluidos": metricas["excluidos"],
+            "incluidos": metricas["incluidos"]
+        }]
+    )
+
+    if os.path.exists(arquivo):
+        historico = pd.read_csv(arquivo)
+        historico = pd.concat([historico, nova_linha], ignore_index=True)
+    else:
+        historico = nova_linha
+
+    historico.to_csv(arquivo, index=False)
+
+
 if st.button("Conferir tabloide"):
     if not xlsx_file or not pdf_file:
         st.warning("Envie o XLSX e o PDF para iniciar a conferência.")
@@ -704,6 +676,7 @@ if st.button("Conferir tabloide"):
 
         with st.spinner("Comparando dados..."):
             resultado = conferir(df, paginas)
+
         resultado["Página provável"] = resultado["Página provável"].astype(str)
         resultado["Score descrição"] = resultado["Score descrição"].astype(str)
 
@@ -726,12 +699,14 @@ if st.button("Conferir tabloide"):
             "excluidos": excluidos,
             "incluidos": incluidos
         }
-salvar_historico(
-    st.session_state.usuario,
-    xlsx_file.name if xlsx_file else "",
-    pdf_file.name if pdf_file else "",
-    st.session_state.metricas
-)
+
+        salvar_historico(
+            st.session_state.usuario,
+            xlsx_file.name if xlsx_file else "",
+            pdf_file.name if pdf_file else "",
+            st.session_state.metricas
+        )
+
 
 if st.session_state.resultado is not None:
     resultado = st.session_state.resultado
@@ -813,47 +788,47 @@ if st.session_state.resultado is not None:
                 use_container_width=True
             )
 
-        arquivo_excel_completo = gerar_excel(
-            resultado,
-            ignorados,
-            metricas,
-            st.session_state.usuario
-        )
-
-        arquivo_excel_alertas = gerar_excel(
-            resultado,
-            ignorados,
-            metricas,
-            st.session_state.usuario,
-            somente_alertas=True
-        )
-
-col_a, col_b = st.columns(2)
-
-st.divider()
-
-if os.path.exists("historico.csv"):
-    st.subheader("📋 Histórico de Conferências")
-
-    historico = pd.read_csv("historico.csv")
-
-    st.dataframe(
-        historico.sort_index(ascending=False),
-        use_container_width=True
+    arquivo_excel_completo = gerar_excel(
+        resultado,
+        ignorados,
+        metricas,
+        st.session_state.usuario
     )
 
-with col_a:
-            st.download_button(
-                label="📥 Baixar relatório completo",
-                data=arquivo_excel_completo,
-                file_name="relatorio_completo.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    arquivo_excel_alertas = gerar_excel(
+        resultado,
+        ignorados,
+        metricas,
+        st.session_state.usuario,
+        somente_alertas=True
+    )
 
-with col_b:
-            st.download_button(
-                label="⚠️ Baixar pontos de atenção",
-                data=arquivo_excel_alertas,
-                file_name="relatorio_divergencias.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    st.divider()
+
+    if os.path.exists("historico.csv"):
+        st.subheader("📋 Histórico de Conferências")
+
+        historico = pd.read_csv("historico.csv")
+
+        st.dataframe(
+            historico.sort_index(ascending=False),
+            use_container_width=True
+        )
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.download_button(
+            label="📥 Baixar relatório completo",
+            data=arquivo_excel_completo,
+            file_name="relatorio_completo.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    with col_b:
+        st.download_button(
+            label="⚠️ Baixar pontos de atenção",
+            data=arquivo_excel_alertas,
+            file_name="relatorio_divergencias.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
