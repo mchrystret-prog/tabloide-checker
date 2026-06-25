@@ -1,14 +1,17 @@
-import streamlit as st
+import re
+import os
+import unicodedata
+from datetime import datetime
+from io import BytesIO
+
+import fitz
 import pandas as pd
+import streamlit as st
+from PIL import Image
 from pypdf import PdfReader
 from rapidfuzz import fuzz
-from io import BytesIO
 from streamlit_cookies_manager import EncryptedCookieManager
-import unicodedata
-import fitz
-from PIL import Image
-from datetime import datetime
-import os
+
 
 st.set_page_config(
     page_title="Tabloide Checker",
@@ -16,7 +19,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.3.1"
+VERSAO = "1.4.0"
 
 
 def obter_senha_cookie():
@@ -46,6 +49,8 @@ def obter_usuarios():
         return dict(st.secrets["usuarios"])
     except Exception:
         return {}
+
+
 def obter_perfil(usuario):
     try:
         return st.secrets["perfis"].get(usuario, "USUARIO")
@@ -98,8 +103,8 @@ if not st.session_state.logado:
 st.session_state.perfil = obter_perfil(st.session_state.usuario)
 
 with st.sidebar:
-    st.success(f"Logado como: {st.session_state.usuario}✅") 
-    st.caption(f"Perfil: {st.session_state.perfil}")
+    st.success(f"✅ Logado como: {st.session_state.usuario}")
+    st.caption(f"👤 Perfil: {st.session_state.perfil}")
     st.divider()
     st.caption("Tabloide Checker")
     st.caption(f"Versão {VERSAO}")
@@ -132,8 +137,7 @@ if pagina == "🏠 Conferência":
         "Utilize esta área para validar automaticamente preços e "
         "descrições do tabloide antes da publicação."
     )
-
-elif pagina == "📋 Histórico":
+else:
     descricao = (
         "Consulte o histórico de conferências realizadas, "
         "acompanhe divergências encontradas e monitore a evolução das validações."
@@ -141,7 +145,7 @@ elif pagina == "📋 Histórico":
 
 st.markdown(
     f"""
-### Bem-vindo, {st.session_state.usuario.capitalize()}👋 
+### Bem-vindo, {st.session_state.usuario.capitalize()} 👋
 
 {descricao}
 """
@@ -170,14 +174,12 @@ def remover_acentos(texto):
 def texto_busca(texto):
     if pd.isna(texto):
         return ""
-
     return remover_acentos(str(texto)).upper().strip()
 
 
 def formatar_preco(valor):
     if pd.isna(valor):
         return ""
-
     try:
         return f"{float(valor):.2f}".replace(".", ",")
     except Exception:
@@ -187,14 +189,7 @@ def formatar_preco(valor):
 def limpar_texto(texto):
     if pd.isna(texto):
         return ""
-
-    return (
-        str(texto)
-        .replace("\n", " ")
-        .replace("  ", " ")
-        .strip()
-        .upper()
-    )
+    return str(texto).replace("\n", " ").replace("  ", " ").strip().upper()
 
 
 def aplicar_tipo_blocos(df):
@@ -226,24 +221,14 @@ def aplicar_tipo_blocos(df):
 
 
 def ler_aba_agencia(arquivo):
-    df = pd.read_excel(
-        arquivo,
-        sheet_name="Agência",
-        header=2
-    )
-
+    df = pd.read_excel(arquivo, sheet_name="Agência", header=2)
     df["Aba"] = "Agência"
     df = aplicar_tipo_blocos(df)
-
     return df
 
 
 def ler_aba_flv(arquivo):
-    df_raw = pd.read_excel(
-        arquivo,
-        sheet_name="FLV",
-        header=None
-    )
+    df_raw = pd.read_excel(arquivo, sheet_name="FLV", header=None)
 
     df = pd.DataFrame()
     df["Código"] = df_raw.iloc[:, 0]
@@ -255,7 +240,6 @@ def ler_aba_flv(arquivo):
     df["Aba"] = "FLV"
 
     df = aplicar_tipo_blocos(df)
-
     return df
 
 
@@ -294,31 +278,19 @@ def carregar_xlsx(arquivo):
     df = df.dropna(subset=["Descrição"])
     df = df[df["Tipo"] != "SEPARADOR"].copy()
 
-    df = df[
-        pd.to_numeric(df["PREÇO"], errors="coerce").notna()
-    ].copy()
+    df = df[pd.to_numeric(df["PREÇO"], errors="coerce").notna()].copy()
 
     total_antes = len(df)
 
     ignorados = df[
         (df["Tipo"] != "EXCLUÍDO")
-        & (
-            df["Descrição"]
-            .astype(str)
-            .str.upper()
-            .str.contains("INTERNO", na=False)
-        )
+        & df["Descrição"].astype(str).str.upper().str.contains("INTERNO", na=False)
     ].copy()
 
     df = df[
         ~(
             (df["Tipo"] != "EXCLUÍDO")
-            & (
-                df["Descrição"]
-                .astype(str)
-                .str.upper()
-                .str.contains("INTERNO", na=False)
-            )
+            & df["Descrição"].astype(str).str.upper().str.contains("INTERNO", na=False)
         )
     ].copy()
 
@@ -352,22 +324,13 @@ def carregar_pdf(arquivo):
 
 def gerar_preview_pagina(pdf_bytes, numero_pagina):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
     page = doc.load_page(numero_pagina - 1)
 
-    pix = page.get_pixmap(
-        matrix=fitz.Matrix(1.3, 1.3),
-        alpha=False
-    )
+    pix = page.get_pixmap(matrix=fitz.Matrix(1.3, 1.3), alpha=False)
 
-    img = Image.frombytes(
-        "RGB",
-        [pix.width, pix.height],
-        pix.samples
-    )
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
     doc.close()
-
     return img
 
 
@@ -382,6 +345,25 @@ def preco_na_pagina(preco, texto_pagina):
     ]
 
     return any(p in texto_pagina for p in possibilidades)
+
+
+def extrair_precos_da_pagina(texto_pagina):
+    precos = re.findall(r"\b\d{1,3},\d{2}\b", texto_pagina)
+    return list(dict.fromkeys(precos))
+
+
+def encontrar_preco_divergente(preco_xlsx, texto_pagina):
+    precos_pdf = extrair_precos_da_pagina(texto_pagina)
+
+    if not preco_xlsx:
+        return ""
+
+    precos_diferentes = [preco for preco in precos_pdf if preco != preco_xlsx]
+
+    if precos_diferentes:
+        return precos_diferentes[0]
+
+    return ""
 
 
 def encontrar_pagina(descricao, paginas):
@@ -402,17 +384,14 @@ def pegar_texto_pagina(numero_pagina, paginas):
     for pagina in paginas:
         if pagina["pagina"] == numero_pagina:
             return pagina["texto"]
-
     return ""
 
 
 def classificar_descricao(score):
     if score >= 85:
         return "OK"
-
     if score >= 60:
         return "REVISAR"
-
     return "DIVERGÊNCIA"
 
 
@@ -427,6 +406,9 @@ def definir_motivo_principal(score, status_descricao, apontamentos):
 
     if "PREÇO COOPERMAIS" in texto:
         return "Preço CooperMais não encontrado"
+
+    if "PREÇO DIVERGENTE" in texto:
+        return "Preço divergente no PDF"
 
     if "PREÇO REGULAR" in texto:
         return "Preço regular não encontrado"
@@ -503,6 +485,10 @@ def conferir(df, paginas):
 
         preco_regular_ok = preco_na_pagina(preco_regular, texto_pagina)
 
+        preco_divergente_pdf = ""
+        if not preco_regular_ok:
+            preco_divergente_pdf = encontrar_preco_divergente(preco_regular, texto_pagina)
+
         apontamentos = []
 
         if tipo_item == "INCLUÍDO":
@@ -521,7 +507,12 @@ def conferir(df, paginas):
             apontamentos.append("Embalagem não encontrada na página do produto")
 
         if not preco_regular_ok:
-            apontamentos.append("Preço regular não encontrado na página do produto")
+            if preco_divergente_pdf:
+                apontamentos.append(
+                    f"Preço divergente no PDF: XLSX {preco_regular} | PDF {preco_divergente_pdf}"
+                )
+            else:
+                apontamentos.append("Preço regular não encontrado na página do produto")
 
         if not coopermais_ok:
             apontamentos.append("Preço CooperMais não encontrado na página do produto")
@@ -533,11 +524,7 @@ def conferir(df, paginas):
         else:
             status_final = "OK"
 
-        motivo_principal = definir_motivo_principal(
-            score,
-            status_descricao,
-            apontamentos
-        )
+        motivo_principal = definir_motivo_principal(score, status_descricao, apontamentos)
 
         if tipo_item == "INCLUÍDO" and status_final == "OK":
             motivo_principal = "Produto incluído conferido"
@@ -569,13 +556,10 @@ def conferir(df, paginas):
 def destacar_linhas(row):
     if row["Status"] == "DIVERGÊNCIA":
         return ["background-color: #5c1f1f"] * len(row)
-
     if row["Status"] == "REVISAR":
         return ["background-color: #5c4b1f"] * len(row)
-
     if row["Status"] == "EXCLUÍDO":
         return ["background-color: #3a3a3a"] * len(row)
-
     return [""] * len(row)
 
 
@@ -689,44 +673,47 @@ if pagina == "📋 Histórico":
 
     if os.path.exists("historico.csv"):
         historico = pd.read_csv("historico.csv")
-        historico["data_hora"] = pd.to_datetime(
-        historico["data_hora"],
-        format="%d/%m/%Y %H:%M:%S",
-        errors="coerce"
-        )
-        historico = historico.sort_values(
-        by="data_hora",
-        ascending=False
-        )
 
-        historico = historico.reset_index(drop=True)
+        if not historico.empty:
+            historico["data_hora"] = pd.to_datetime(
+                historico["data_hora"],
+                format="%d/%m/%Y %H:%M:%S",
+                errors="coerce"
+            )
 
+            historico = historico.sort_values(by="data_hora", ascending=False).reset_index(drop=True)
 
-        total_conferencias = len(historico)
-        total_divergencias = historico["divergencias"].sum()
-        total_revisar = historico["revisar"].sum()
-        usuarios_ativos = historico["usuario"].nunique()
+            total_conferencias = len(historico)
+            total_divergencias = historico["divergencias"].sum()
+            total_revisar = historico["revisar"].sum()
+            usuarios_ativos = historico["usuario"].nunique()
 
-        c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Conferências", total_conferencias)
+            c2.metric("Divergências", int(total_divergencias))
+            c3.metric("Itens Revisar", int(total_revisar))
+            c4.metric("Usuários", usuarios_ativos)
 
-        c1.metric("Conferências", total_conferencias)
-        c2.metric("Divergências", int(total_divergencias))
-        c3.metric("Itens Revisar", int(total_revisar))
-        c4.metric("Usuários", usuarios_ativos)
+            historico_exibir = historico.copy()
+            historico_exibir["data_hora"] = (
+                historico_exibir["data_hora"]
+                .dt.strftime("%d/%m/%Y %H:%M:%S")
+            )
 
-        historico = historico.iloc[::-1].reset_index(drop=True)
-        historico_exibir = historico.copy()
-
-        historico_exibir["data_hora"] = (
-        historico_exibir["data_hora"]
-        .dt.strftime("%d/%m/%Y %H:%M:%S")
-)
-        st.dataframe(
-            historico_exibir,
-            use_container_width=True
-)
-
+            st.dataframe(historico_exibir, use_container_width=True)
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Conferências", 0)
+            c2.metric("Divergências", 0)
+            c3.metric("Itens Revisar", 0)
+            c4.metric("Usuários", 0)
+            st.dataframe(historico, use_container_width=True)
     else:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Conferências", 0)
+        c2.metric("Divergências", 0)
+        c3.metric("Itens Revisar", 0)
+        c4.metric("Usuários", 0)
         st.info("Nenhuma conferência registrada ainda.")
 
     st.stop()
@@ -850,10 +837,7 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
         if paginas_disponiveis:
             st.subheader("Visualizar página do PDF")
 
-            pagina_escolhida = st.selectbox(
-                "Selecione a página",
-                paginas_disponiveis
-            )
+            pagina_escolhida = st.selectbox("Selecione a página", paginas_disponiveis)
 
             with st.spinner("Carregando página do PDF..."):
                 imagem_pagina = gerar_preview_pagina(
