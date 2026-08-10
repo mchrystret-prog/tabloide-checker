@@ -85,8 +85,22 @@ def obter_coluna(df, nome, valor_padrao=None):
     return pd.Series([valor_padrao] * len(df), index=df.index)
 
 
+def tem_coluna(df, nome):
+    alvo = normalizar_nome(nome)
+    return any(normalizar_nome(coluna) == alvo for coluna in df.columns)
+
+
 def ler_modelo_tabaloide_digital(excel, aba):
     origem = pd.read_excel(excel, sheet_name=aba, header=0)
+
+    if tem_coluna(origem, "Principal"):
+        principal = obter_coluna(origem, "Principal")
+        mascara_principal = principal.apply(
+            lambda valor: valor is True
+            or str(valor).strip().upper() in {"TRUE", "1", "SIM", "YES"}
+        )
+        if mascara_principal.any():
+            origem = origem[mascara_principal].copy()
 
     descricao_marketing = obter_coluna(origem, "Descritivo Marketing")
     descricao_cadastro = obter_coluna(origem, "Descrição Cadastro")

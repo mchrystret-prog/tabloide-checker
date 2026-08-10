@@ -8,3 +8,4 @@ streamlit-cookies-manager
 pymupdf
 pillow
 pytesseract
+numpy

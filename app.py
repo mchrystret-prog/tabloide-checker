@@ -1,5 +1,6 @@
 import re
 import os
+import unicodedata
 from datetime import datetime
 from io import BytesIO
 
@@ -21,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.6.0"
+VERSAO = "1.7.0"
 
 
 def obter_senha_cookie():
@@ -182,6 +183,13 @@ def limpar_texto(texto):
     return str(texto).replace("\n", " ").replace("  ", " ").strip().upper()
 
 
+def texto_comparacao(texto):
+    texto = str(texto)
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return re.sub(r"[^A-Z0-9]+", " ", texto.upper()).strip()
+
+
 def carregar_xlsx(arquivo):
     df_original, modelo_planilha = ler_planilha_normalizada(arquivo)
 
@@ -310,7 +318,15 @@ def preco_na_pagina(preco, texto_pagina):
         preco.replace(",", " ")
     ]
 
-    return any(p in texto_pagina for p in possibilidades)
+    if any(p in texto_pagina for p in possibilidades):
+        return True
+
+    partes = preco.split(",")
+    if len(partes) == 2:
+        padrao = rf"(?<!\d){re.escape(partes[0])}\D{{0,3}}{re.escape(partes[1])}(?!\d)"
+        return bool(re.search(padrao, texto_pagina))
+
+    return False
 
 
 def extrair_precos_da_pagina(texto_pagina):
@@ -332,12 +348,18 @@ def encontrar_preco_divergente(preco_xlsx, texto_pagina):
     return ""
 
 
-def encontrar_pagina(descricao, paginas):
+def encontrar_pagina(descricao, paginas, modo_ocr=False):
     melhor_pagina = "-"
     melhor_score = 0
 
     for pagina in paginas:
-        score = fuzz.partial_ratio(descricao, pagina["texto"])
+        if modo_ocr:
+            score = fuzz.token_set_ratio(
+                texto_comparacao(descricao),
+                texto_comparacao(pagina["texto"])
+            )
+        else:
+            score = fuzz.partial_ratio(descricao, pagina["texto"])
 
         if score > melhor_score:
             melhor_score = score
@@ -353,8 +375,8 @@ def pegar_texto_pagina(numero_pagina, paginas):
     return ""
 
 
-def classificar_descricao(score):
-    if score >= 85:
+def classificar_descricao(score, limiar_ok=85):
+    if score >= limiar_ok:
         return "OK"
     if score >= 60:
         return "REVISAR"
@@ -391,8 +413,9 @@ def definir_motivo_principal(score, status_descricao, apontamentos):
     return ""
 
 
-def conferir(df, paginas):
+def conferir(df, paginas, tipo_documento="PDF"):
     resultados = []
+    modo_ocr = tipo_documento == "JPEG"
 
     for _, row in df.iterrows():
         tipo_item = row["Tipo"]
@@ -428,10 +451,13 @@ def conferir(df, paginas):
             and not coopermais
         )
 
-        pagina, score = encontrar_pagina(descricao, paginas)
+        pagina, score = encontrar_pagina(descricao, paginas, modo_ocr)
         texto_pagina = pegar_texto_pagina(pagina, paginas)
 
-        status_descricao = classificar_descricao(score)
+        status_descricao = classificar_descricao(
+            score,
+            limiar_ok=80 if modo_ocr else 85
+        )
 
         if produto_por_quilo_sem_coopermais:
             unidade_ok = True
@@ -464,33 +490,61 @@ def conferir(df, paginas):
             apontamentos.append("Revisar descrição")
 
         if status_descricao == "DIVERGÊNCIA":
-            apontamentos.append("Produto da grade não encontrado no PDF")
+            apontamentos.append(
+                "Produto da grade não reconhecido nas imagens JPEG"
+                if modo_ocr
+                else "Produto da grade não encontrado no PDF"
+            )
 
-        if not unidade_ok:
-            apontamentos.append("Unidade de medida não encontrada na página do produto")
+        if modo_ocr:
+            preco_principal_ok = coopermais_ok if coopermais else preco_regular_ok
 
-        if not embalagem_ok:
-            apontamentos.append("Embalagem não encontrada na página do produto")
+            if not preco_principal_ok:
+                apontamentos.append("Preço principal não reconhecido pelo OCR")
 
-        if not preco_regular_ok:
-            if preco_divergente_pdf:
-                apontamentos.append(
-                    f"Preço divergente no PDF: XLSX {preco_regular} | PDF {preco_divergente_pdf}"
+            if status_descricao == "DIVERGÊNCIA":
+                status_final = "DIVERGÊNCIA"
+                motivo_principal = "Produto não reconhecido nas imagens JPEG"
+            elif status_descricao == "REVISAR" or not preco_principal_ok:
+                status_final = "REVISAR"
+                motivo_principal = (
+                    "Revisar descrição reconhecida pelo OCR"
+                    if status_descricao == "REVISAR"
+                    else "Revisar preço não reconhecido pelo OCR"
                 )
             else:
-                apontamentos.append("Preço regular não encontrado na página do produto")
-
-        if not coopermais_ok:
-            apontamentos.append("Preço CooperMais não encontrado na página do produto")
-
-        if any("não encontrada" in item or "não encontrado" in item for item in apontamentos):
-            status_final = "DIVERGÊNCIA"
-        elif status_descricao == "REVISAR":
-            status_final = "REVISAR"
+                status_final = "OK"
+                motivo_principal = ""
         else:
-            status_final = "OK"
+            if not unidade_ok:
+                apontamentos.append("Unidade de medida não encontrada na página do produto")
 
-        motivo_principal = definir_motivo_principal(score, status_descricao, apontamentos)
+            if not embalagem_ok:
+                apontamentos.append("Embalagem não encontrada na página do produto")
+
+            if not preco_regular_ok:
+                if preco_divergente_pdf:
+                    apontamentos.append(
+                        f"Preço divergente no PDF: XLSX {preco_regular} | PDF {preco_divergente_pdf}"
+                    )
+                else:
+                    apontamentos.append("Preço regular não encontrado na página do produto")
+
+            if not coopermais_ok:
+                apontamentos.append("Preço CooperMais não encontrado na página do produto")
+
+            if any("não encontrada" in item or "não encontrado" in item for item in apontamentos):
+                status_final = "DIVERGÊNCIA"
+            elif status_descricao == "REVISAR":
+                status_final = "REVISAR"
+            else:
+                status_final = "OK"
+
+            motivo_principal = definir_motivo_principal(
+                score,
+                status_descricao,
+                apontamentos
+            )
 
         if tipo_item == "INCLUÍDO" and status_final == "OK":
             motivo_principal = "Produto incluído conferido"
@@ -508,9 +562,13 @@ def conferir(df, paginas):
             "Preço Regular XLSX": preco_regular,
             "CooperMais XLSX": coopermais,
             "Regra especial": (
-                "Quilo sem CooperMais"
-                if produto_por_quilo_sem_coopermais
-                else ""
+                "Conferência JPEG por OCR"
+                if modo_ocr
+                else (
+                    "Quilo sem CooperMais"
+                    if produto_por_quilo_sem_coopermais
+                    else ""
+                )
             ),
             "Score descrição": round(score, 2),
             "Apontamentos": "; ".join(apontamentos)
@@ -736,7 +794,7 @@ if pagina == "🏠 Conferência":
                     }
 
                 with st.spinner("Comparando dados..."):
-                    resultado = conferir(df, paginas)
+                    resultado = conferir(df, paginas, tipo_documento)
             except Exception as erro:
                 st.error(f"Não foi possível processar os arquivos: {erro}")
                 st.stop()
