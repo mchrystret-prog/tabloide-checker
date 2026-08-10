@@ -1,4 +1,4 @@
-# Tabloide Checker 2.1
+# Tabloide Checker 2.1.1
 
 Conferência gratuita de grades de ofertas XLSX com tabloides em PDF ou imagens
 JPEG/JPG. Todo o processamento acontece no próprio servidor da aplicação: não

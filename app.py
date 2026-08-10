@@ -22,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "2.1.0"
+VERSAO = "2.1.1"
 
 
 def obter_senha_cookie():
