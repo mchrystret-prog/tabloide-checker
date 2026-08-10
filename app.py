@@ -14,7 +14,6 @@ from streamlit_cookies_manager import EncryptedCookieManager
 
 from ocr_utils import abrir_imagem_jpeg, analisar_jpeg
 from planilha_utils import ler_planilha_normalizada
-from vision_utils import analisar_pagina_com_visao, obter_configuracao_openai
 
 
 st.set_page_config(
@@ -23,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "2.0.0"
+VERSAO = "2.1.0"
 
 
 def obter_senha_cookie():
@@ -284,7 +283,7 @@ def carregar_pdf(arquivo):
     return paginas
 
 
-def carregar_jpegs(arquivos, df=None, usar_visao=False):
+def carregar_jpegs(arquivos):
     """Executa OCR e transforma cada JPEG em uma página pesquisável."""
     paginas = []
 
@@ -292,25 +291,17 @@ def carregar_jpegs(arquivos, df=None, usar_visao=False):
         imagem = abrir_imagem_jpeg(arquivo)
         analise = analisar_jpeg(imagem)
         texto_limpo = limpar_texto(analise["texto"])
-        cards_visao = (
-            analisar_pagina_com_visao(imagem, df, i + 1)
-            if usar_visao and df is not None
-            else []
-        )
-
         paginas.append({
             "pagina": i + 1,
             "texto": texto_limpo,
             "precos_promocionais": analise["precos_promocionais"],
             "blocos_promocionais": analise["blocos"],
-            "cards_visao": cards_visao,
-            "modo_visao": usar_visao,
         })
 
     return paginas
 
 
-def carregar_documento(arquivos, df=None, usar_visao=False):
+def carregar_documento(arquivos):
     """Lê um PDF ou uma sequência de imagens JPEG."""
     if not arquivos:
         raise ValueError("Nenhum arquivo do tabloide foi enviado.")
@@ -327,7 +318,7 @@ def carregar_documento(arquivos, df=None, usar_visao=False):
             raise ValueError("Envie apenas um PDF por conferência.")
         return carregar_pdf(arquivos[0]), "PDF"
 
-    return carregar_jpegs(arquivos, df=df, usar_visao=usar_visao), "JPEG"
+    return carregar_jpegs(arquivos), "JPEG"
 
 
 def gerar_preview_pagina(pdf_bytes, numero_pagina):
@@ -442,6 +433,61 @@ def encontrar_bloco_produto(descricao, dados_pagina):
     return melhor_bloco, melhor_score
 
 
+def atribuir_blocos_produtos(df, paginas):
+    """Faz associação global um-para-um entre itens e cards da arte."""
+    possibilidades = []
+
+    for indice_linha, row in df.iterrows():
+        if row["Tipo"] == "EXCLUÍDO":
+            continue
+        descricao = texto_comparacao(row["Descrição"])
+        regular = row["preco_regular_fmt"]
+        coopermais = row["coopermais_fmt"]
+
+        for dados_pagina in paginas:
+            for indice_bloco, bloco in enumerate(
+                dados_pagina.get("blocos_promocionais", [])
+            ):
+                score_texto = fuzz.token_set_ratio(
+                    descricao, texto_comparacao(bloco.get("texto", ""))
+                )
+                tem_preco_lido = bool(
+                    bloco.get("precos") or bloco.get("precos_card")
+                )
+                if not tem_preco_lido and score_texto < 65:
+                    continue
+                bonus_preco = 0
+                if coopermais and coopermais in set(bloco.get("precos", [])):
+                    bonus_preco += 12
+                if regular and regular in set(bloco.get("precos_card", [])):
+                    bonus_preco += 5
+                score_total = min(100, score_texto + bonus_preco)
+                if score_total >= 40:
+                    possibilidades.append(
+                        (
+                            score_total,
+                            score_texto,
+                            indice_linha,
+                            dados_pagina["pagina"],
+                            indice_bloco,
+                            bloco,
+                        )
+                    )
+
+    atribuicoes = {}
+    blocos_ocupados = set()
+    for _, score_texto, indice_linha, pagina, indice_bloco, bloco in sorted(
+        possibilidades, reverse=True, key=lambda item: (item[0], item[1])
+    ):
+        chave_bloco = (pagina, indice_bloco)
+        if indice_linha in atribuicoes or chave_bloco in blocos_ocupados:
+            continue
+        atribuicoes[indice_linha] = (pagina, bloco, score_texto)
+        blocos_ocupados.add(chave_bloco)
+
+    return atribuicoes
+
+
 def campo_no_card(valor, texto_card, campo=""):
     if not valor:
         return True
@@ -518,237 +564,13 @@ def definir_motivo_principal(score, status_descricao, apontamentos):
     return ""
 
 
-def normalizar_codigo(valor):
-    texto = str(valor).strip()
-    return texto[:-2] if texto.endswith(".0") else texto
-
-
-def normalizar_preco_lido(valor):
-    if valor is None or str(valor).strip() == "":
-        return ""
-    achado = re.search(r"(\d{1,3})\D?(\d{2})", str(valor))
-    if not achado:
-        return ""
-    return f"{int(achado.group(1))},{achado.group(2)}"
-
-
-def conferir_com_visao(df, paginas):
-    """Compara os campos estruturados lidos visualmente, sem inferir ausências."""
-    resultados = []
-    cards = []
-    usados = set()
-
-    for pagina in paginas:
-        for indice, card in enumerate(pagina.get("cards_visao", [])):
-            cards.append((pagina["pagina"], indice, card))
-
-    por_codigo = {}
-    for pagina, indice, card in cards:
-        codigo = normalizar_codigo(card.get("codigo_planilha"))
-        if codigo and codigo.lower() != "none":
-            por_codigo.setdefault(codigo, []).append((pagina, indice, card))
-
-    for _, row in df.iterrows():
-        tipo_item = row["Tipo"]
-        codigo = normalizar_codigo(row["Código"])
-        candidatos = por_codigo.get(codigo, [])
-        candidato = max(
-            candidatos,
-            key=lambda item: float(item[2].get("confianca", 0)),
-            default=None,
-        )
-
-        if candidato is None:
-            # Recupera apenas correspondências textuais fortes que vieram sem código.
-            alternativas = []
-            for pagina, indice, card in cards:
-                if (pagina, indice) in usados:
-                    continue
-                score_alt = fuzz.token_set_ratio(
-                    texto_comparacao(row["Descrição"]),
-                    texto_comparacao(card.get("descricao_arte", "")),
-                )
-                if score_alt >= 88:
-                    alternativas.append((score_alt, pagina, indice, card))
-            if alternativas:
-                _, pagina_card, indice_card, card = max(alternativas)
-                candidato = (pagina_card, indice_card, card)
-
-        base = {
-            "Aba": row["Aba"],
-            "Tipo": tipo_item,
-            "Código": row["Código"],
-            "Descrição": row["Descrição"],
-            "Embalagem": row["Embalagem"],
-            "Unid.Medida": row["Unid.Medida"],
-            "Preço Regular XLSX": row["preco_regular_fmt"],
-            "CooperMais XLSX": row["coopermais_fmt"],
-        }
-
-        if tipo_item == "EXCLUÍDO":
-            resultados.append({
-                "Status": "EXCLUÍDO", "Motivo principal": "Produto excluído",
-                "Página provável": "-", **base,
-                "Regra especial": "Produto listado no bloco EXCLUÍDOS",
-                "Confiança": "-", "Descrição status": "NÃO APLICÁVEL",
-                "Unidade/embalagem status": "NÃO APLICÁVEL",
-                "Preço regular status": "NÃO APLICÁVEL",
-                "CooperMais status": "NÃO APLICÁVEL", "Preço regular OCR": "-",
-                "CooperMais OCR": "-", "Preço reconhecido OCR": "-",
-                "Evidências": "Produto excluído da conferência", "Score card": "-",
-                "Score descrição": "-", "Apontamentos": "Produto excluído",
-            })
-            continue
-
-        if candidato is None:
-            resultados.append({
-                "Status": "AUSENTE",
-                "Motivo principal": "Produto da planilha não localizado na arte",
-                "Página provável": "-", **base,
-                "Regra especial": "Conferência híbrida OCR + visão",
-                "Confiança": "Alta", "Descrição status": "AUSENTE",
-                "Unidade/embalagem status": "NÃO APLICÁVEL",
-                "Preço regular status": "NÃO APLICÁVEL",
-                "CooperMais status": "NÃO APLICÁVEL", "Preço regular OCR": "",
-                "CooperMais OCR": "", "Preço reconhecido OCR": "",
-                "Evidências": "Nenhum card visual compatível nas páginas enviadas",
-                "Score card": "-", "Score descrição": "-",
-                "Apontamentos": "Produto da planilha ausente na arte",
-            })
-            continue
-
-        pagina_card, indice_card, card = candidato
-        usados.add((pagina_card, indice_card))
-        descricao_arte = card.get("descricao_arte", "")
-        score = fuzz.token_set_ratio(
-            texto_comparacao(row["Descrição"]), texto_comparacao(descricao_arte)
-        )
-        texto_unidade_arte = " ".join(
-            str(valor) for valor in (
-                card.get("embalagem_arte"), card.get("unidade_arte")
-            ) if valor
-        )
-        embalagem_ok = campo_no_card(row["embalagem_limpa"], texto_unidade_arte)
-        unidade_ok = campo_no_card(row["unidade_limpa"], texto_unidade_arte)
-        unidade_completa_ok = embalagem_ok and unidade_ok
-
-        regular_esperado = row["preco_regular_fmt"]
-        cooper_esperado = row["coopermais_fmt"]
-        regular_arte = normalizar_preco_lido(card.get("preco_regular_arte"))
-        cooper_arte = normalizar_preco_lido(card.get("preco_coopermais_arte"))
-
-        desc_status = "OK" if score >= 88 else ("REVISAR" if score >= 72 else "DIVERGENTE")
-        unidade_status = "OK" if unidade_completa_ok else "DIVERGENTE"
-
-        def status_preco(esperado, observado):
-            if not esperado:
-                return "NÃO EXIGIDO"
-            if not observado:
-                return "AUSENTE"
-            return "OK" if esperado == observado else "DIVERGENTE"
-
-        regular_status = status_preco(regular_esperado, regular_arte)
-        cooper_status = status_preco(cooper_esperado, cooper_arte)
-        apontamentos = []
-        divergencias = []
-        incompletos = []
-
-        if desc_status == "DIVERGENTE":
-            divergencias.append("descrição")
-            apontamentos.append(f"Descrição divergente: arte '{descricao_arte}'")
-        elif desc_status == "REVISAR":
-            apontamentos.append("Descrição visual com correspondência parcial")
-        if not unidade_completa_ok:
-            divergencias.append("unidade/embalagem")
-            apontamentos.append(
-                f"Unidade/embalagem divergente: arte '{texto_unidade_arte or 'ausente'}'"
-            )
-        for nome, esperado, observado, status in (
-            ("Preço regular", regular_esperado, regular_arte, regular_status),
-            ("CooperMais", cooper_esperado, cooper_arte, cooper_status),
-        ):
-            if status == "DIVERGENTE":
-                divergencias.append(nome.lower())
-                apontamentos.append(f"{nome} divergente: planilha {esperado} | arte {observado}")
-            elif status == "AUSENTE":
-                incompletos.append(nome.lower())
-                apontamentos.append(f"{nome} ausente na arte: esperado {esperado}")
-
-        confianca_num = float(card.get("confianca", 0))
-        if divergencias:
-            status_final = "DIVERGÊNCIA"
-            motivo = "Campos divergentes: " + ", ".join(divergencias)
-        elif incompletos:
-            status_final = "INCOMPLETO"
-            motivo = "Campos ausentes: " + ", ".join(incompletos)
-        elif desc_status == "REVISAR" or confianca_num < 0.72:
-            status_final = "REVISAR"
-            motivo = "Leitura visual requer confirmação"
-        else:
-            status_final = "OK"
-            motivo = "Produto incluído conferido" if tipo_item == "INCLUÍDO" else ""
-
-        resultados.append({
-            "Status": status_final, "Motivo principal": motivo,
-            "Página provável": pagina_card, **base,
-            "Regra especial": "Conferência híbrida OCR + visão",
-            "Confiança": "Alta" if confianca_num >= 0.85 else ("Média" if confianca_num >= 0.72 else "Baixa"),
-            "Descrição status": desc_status,
-            "Unidade/embalagem status": unidade_status,
-            "Preço regular status": regular_status,
-            "CooperMais status": cooper_status,
-            "Preço regular OCR": regular_arte,
-            "CooperMais OCR": cooper_arte,
-            "Preço reconhecido OCR": cooper_arte or regular_arte,
-            "Evidências": f"Card transcrito visualmente; descrição {score:.1f}%",
-            "Score card": round(confianca_num * 100, 2),
-            "Score descrição": round(score, 2),
-            "Apontamentos": "; ".join(apontamentos),
-        })
-
-    codigos_grade = {normalizar_codigo(valor) for valor in df["Código"]}
-    for pagina_card, indice_card, card in cards:
-        if (pagina_card, indice_card) in usados:
-            continue
-        codigo_card = normalizar_codigo(card.get("codigo_planilha"))
-        if codigo_card in codigos_grade:
-            continue
-        resultados.append({
-            "Status": "SEM BASE",
-            "Motivo principal": "Card encontrado sem correspondência nas planilhas",
-            "Página provável": pagina_card, "Aba": "-", "Tipo": "SEM BASE",
-            "Código": codigo_card if codigo_card.lower() != "none" else "-",
-            "Descrição": card.get("descricao_arte", "Card não identificado"),
-            "Embalagem": card.get("embalagem_arte") or "-",
-            "Unid.Medida": card.get("unidade_arte") or "-",
-            "Preço Regular XLSX": "-", "CooperMais XLSX": "-",
-            "Regra especial": "Card adicional identificado visualmente",
-            "Confiança": "Alta" if float(card.get("confianca", 0)) >= 0.85 else "Média",
-            "Descrição status": "SEM BASE", "Unidade/embalagem status": "NÃO APLICÁVEL",
-            "Preço regular status": "NÃO APLICÁVEL", "CooperMais status": "NÃO APLICÁVEL",
-            "Preço regular OCR": normalizar_preco_lido(card.get("preco_regular_arte")),
-            "CooperMais OCR": normalizar_preco_lido(card.get("preco_coopermais_arte")),
-            "Preço reconhecido OCR": normalizar_preco_lido(card.get("preco_coopermais_arte")),
-            "Evidências": "Card transcrito sem item correspondente na grade",
-            "Score card": round(float(card.get("confianca", 0)) * 100, 2),
-            "Score descrição": "-",
-            "Apontamentos": "Confirmar se o produto deveria constar nas planilhas",
-        })
-
-    return pd.DataFrame(resultados)
-
-
 def conferir(df, paginas, tipo_documento="PDF"):
-    if tipo_documento == "JPEG" and any(
-        pagina.get("modo_visao") for pagina in paginas
-    ):
-        return conferir_com_visao(df, paginas)
-
     resultados = []
     modo_ocr = tipo_documento == "JPEG"
     blocos_usados = set()
+    atribuicoes_ocr = atribuir_blocos_produtos(df, paginas) if modo_ocr else {}
 
-    for _, row in df.iterrows():
+    for indice_linha, row in df.iterrows():
         tipo_item = row["Tipo"]
 
         if tipo_item == "EXCLUÍDO":
@@ -844,10 +666,16 @@ def conferir(df, paginas, tipo_documento="PDF"):
 
         if modo_ocr:
             preco_principal = coopermais if coopermais else preco_regular
-            bloco, score_card_num = encontrar_bloco_produto(descricao, dados_pagina)
+            atribuicao = atribuicoes_ocr.get(indice_linha)
+            if atribuicao:
+                pagina, bloco, score_card_num = atribuicao
+                dados_pagina = pegar_dados_pagina(pagina, paginas)
+                texto_pagina = dados_pagina["texto"]
+            else:
+                bloco, score_card_num = None, 0
             score_card = round(score_card_num, 2)
 
-            if bloco is None or score < 55 or score_card_num < 40:
+            if bloco is None or score_card_num < 40:
                 status_final = "AUSENTE"
                 motivo_principal = "Produto da planilha não localizado na arte"
                 confianca = "Alta" if score < 45 else "Média"
@@ -882,6 +710,9 @@ def conferir(df, paginas, tipo_documento="PDF"):
                 preco_coopermais_ocr = ", ".join(sorted(precos_promocionais))
 
                 evidencias.append(f"Descrição do card ({score_card_num:.1f}%)")
+                motores = bloco.get("motores", {})
+                if motores.get("rapidocr"):
+                    evidencias.append("Leitura confirmada por OCR neural local")
                 if coopermais_ok_card and coopermais:
                     preco_reconhecido_ocr = coopermais
                     evidencias.append(f"CooperMais exato ({coopermais})")
@@ -1242,45 +1073,16 @@ if pagina == "🏠 Conferência":
         )
     )
 
-    modo_conferencia = st.radio(
-        "Modo de leitura para imagens JPEG",
-        [
-            "Híbrido confiável (OCR + visão inteligente)",
-            "Somente OCR local",
-        ],
-        help=(
-            "O modo híbrido é o recomendado: ele transcreve cada card de forma "
-            "estruturada e usa o OCR local como apoio. O modo local não consome API, "
-            "mas tende a deixar mais itens para revisão."
-        ),
+    st.caption(
+        "Leitura gratuita em duas camadas: Tesseract em português + OCR neural "
+        "local. Nenhuma imagem é enviada para uma API paga."
     )
-    usar_visao = modo_conferencia.startswith("Híbrido")
-    chave_openai, modelo_openai = obter_configuracao_openai()
-    if usar_visao:
-        if chave_openai:
-            st.caption(f"Leitura visual configurada com o modelo {modelo_openai}.")
-        else:
-            st.info(
-                "Para usar o modo híbrido, configure `openai.api_key` nos Secrets "
-                "do Streamlit. O modo somente OCR continua disponível sem essa chave."
-            )
 
     if st.button("Conferir tabloide"):
         if not xlsx_files or not tabloide_files:
             st.warning("Envie o XLSX e o tabloide em PDF ou JPEG para iniciar a conferência.")
         else:
             try:
-                extensoes_enviadas = {
-                    os.path.splitext(arquivo.name)[1].lower()
-                    for arquivo in tabloide_files
-                }
-                jpeg_enviado = bool(extensoes_enviadas & {".jpg", ".jpeg"})
-                if usar_visao and jpeg_enviado and not chave_openai:
-                    raise ValueError(
-                        "Configure [openai] api_key nos Secrets ou selecione "
-                        "'Somente OCR local'."
-                    )
-
                 with st.spinner("Lendo XLSX..."):
                     (
                         df,
@@ -1293,11 +1095,7 @@ if pagina == "🏠 Conferência":
                 st.success("Planilhas reconhecidas: " + " | ".join(modelo_planilha))
 
                 with st.spinner("Lendo o tabloide e reconhecendo os textos..."):
-                    paginas, tipo_documento = carregar_documento(
-                        tabloide_files,
-                        df=df,
-                        usar_visao=usar_visao and jpeg_enviado,
-                    )
+                    paginas, tipo_documento = carregar_documento(tabloide_files)
 
                 if tipo_documento == "PDF":
                     tabloide_files[0].seek(0)
@@ -1362,6 +1160,12 @@ if pagina == "🏠 Conferência":
                         resultado["Preço reconhecido OCR"].astype(bool).sum()
                     ),
                     "paginas": len(paginas),
+                    "cards_ocr_neural": sum(
+                        1
+                        for dados in paginas
+                        for bloco in dados.get("blocos_promocionais", [])
+                        if bloco.get("motores", {}).get("rapidocr")
+                    ),
                 }
             else:
                 st.session_state.ocr_diagnostico = None
@@ -1402,11 +1206,18 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
             else 0
         )
         st.caption(
-            "Diagnóstico do OCR: "
+            "Diagnóstico da leitura gratuita: "
             f"{diagnostico['precos_unicos']} preços distintos identificados em "
             f"{diagnostico['paginas']} página(s); "
-            f"{diagnostico['itens_com_preco_exato']} item(ns) com preço exato confirmado."
+            f"{diagnostico['itens_com_preco_exato']} item(ns) com preço exato confirmado; "
+            f"{diagnostico.get('cards_ocr_neural', 0)} card(s) receberam a segunda leitura neural."
         )
+        if diagnostico.get("cards_ocr_neural", 0) == 0:
+            st.warning(
+                "O segundo motor local não iniciou. A conferência foi concluída "
+                "somente com o Tesseract e, por segurança, poderá deixar mais itens "
+                "em Revisar. Confira o log de instalação do RapidOCR no Streamlit."
+            )
         if metricas["total"] >= 10 and cobertura < 0.25:
             st.warning(
                 "A leitura de preços ficou abaixo do nível mínimo esperado. "

@@ -1,9 +1,68 @@
 import re
 from collections import Counter
+from functools import lru_cache
 
 import numpy as np
 import pytesseract
 from PIL import Image, ImageFilter, ImageOps
+
+
+@lru_cache(maxsize=1)
+def _motor_rapidocr():
+    """Carrega uma única instância do OCR neural gratuito por processo."""
+    try:
+        from rapidocr import RapidOCR
+
+        return RapidOCR()
+    except Exception:
+        return None
+
+
+def executar_rapidocr(imagem):
+    """Normaliza as saídas das versões atuais e legadas do RapidOCR."""
+    motor = _motor_rapidocr()
+    if motor is None:
+        return []
+
+    try:
+        saida = motor(np.asarray(imagem.convert("RGB")))
+        resultado = saida[0] if isinstance(saida, tuple) else saida
+        linhas = []
+
+        if hasattr(resultado, "txts"):
+            textos_brutos = getattr(resultado, "txts", None)
+            scores_brutos = getattr(resultado, "scores", None)
+            textos = list(textos_brutos) if textos_brutos is not None else []
+            scores = list(scores_brutos) if scores_brutos is not None else []
+            for indice, texto in enumerate(textos):
+                score = float(scores[indice]) if indice < len(scores) else 0.5
+                linhas.append((str(texto), score))
+            return linhas
+
+        for item in resultado or []:
+            if isinstance(item, (list, tuple)) and len(item) >= 3:
+                linhas.append((str(item[1]), float(item[2])))
+        return linhas
+    except Exception:
+        # O Tesseract permanece disponível caso o segundo motor falhe.
+        return []
+
+
+def _texto_e_precos_rapidocr(imagem, confianca_minima=0.58):
+    linhas = executar_rapidocr(imagem)
+    textos = [texto for texto, score in linhas if score >= confianca_minima]
+    precos = {
+        preco
+        for texto, score in linhas
+        if score >= max(0.68, confianca_minima)
+        for preco in _precos_do_texto(texto)
+    }
+    confianca = (
+        sum(score for _, score in linhas) / len(linhas)
+        if linhas
+        else 0.0
+    )
+    return "\n".join(textos), precos, confianca
 
 
 def abrir_imagem_jpeg(arquivo):
@@ -464,6 +523,10 @@ def extrair_blocos_promocionais(imagem):
     for caixa in _detectar_faixas_verdes(imagem_ocr):
         recorte = imagem_ocr.crop(caixa)
         precos = _reconhecer_preco_recorte(recorte)
+        texto_preco_neural, precos_neurais, confianca_preco_neural = (
+            _texto_e_precos_rapidocr(recorte, confianca_minima=0.62)
+        )
+        precos = sorted(set(precos) | set(precos_neurais))
         caixa_card = _caixa_card(caixa, imagem_ocr.size)
         recorte_card = imagem_ocr.crop(caixa_card)
         texto_card_colorido = executar_ocr_texto(
@@ -474,9 +537,18 @@ def extrair_blocos_promocionais(imagem):
             preparar_imagem_ocr(recorte_card),
             configuracao="--oem 3 --psm 6",
         )
-        texto_card = "\n".join([texto_card_colorido, texto_card_tratado])
+        texto_card_neural, precos_card_neurais, confianca_card_neural = (
+            _texto_e_precos_rapidocr(recorte_card)
+        )
+        texto_card = "\n".join(
+            [texto_card_colorido, texto_card_tratado, texto_card_neural]
+        )
         precos_regulares = _reconhecer_precos_regulares(imagem_ocr, caixa)
-        precos_card = sorted(set(_precos_do_texto(texto_card)) | set(precos_regulares))
+        precos_card = sorted(
+            set(_precos_do_texto(texto_card))
+            | set(precos_regulares)
+            | set(precos_card_neurais)
+        )
         blocos.append({
             "caixa": caixa,
             "caixa_card": caixa_card,
@@ -484,6 +556,13 @@ def extrair_blocos_promocionais(imagem):
             "precos": precos,
             "precos_card": precos_card,
             "precos_regulares": precos_regulares,
+            "motores": {
+                "tesseract": True,
+                "rapidocr": bool(texto_card_neural or texto_preco_neural),
+            },
+            "confianca_neural": round(
+                max(confianca_card_neural, confianca_preco_neural), 3
+            ),
         })
 
     return blocos

@@ -1,8 +1,8 @@
-# Tabloide Checker 2.0
+# Tabloide Checker 2.1
 
-Conferência de grades de ofertas XLSX com tabloides em PDF ou imagens
-JPEG/JPG. Para JPEG, a versão 2.0 oferece um modo híbrido que combina OCR local
-e leitura visual estruturada.
+Conferência gratuita de grades de ofertas XLSX com tabloides em PDF ou imagens
+JPEG/JPG. Todo o processamento acontece no próprio servidor da aplicação: não
+há API paga, chave externa nem cobrança por página.
 
 ## O que é validado
 
@@ -40,38 +40,26 @@ No modelo `Tabloide Digital`, o descritivo de marketing é usado como descriçã
 principal. Quando a coluna `Principal` existe, somente os registros marcados
 como principais entram na conferência.
 
-## Modos para JPEG
+## Leitura gratuita em duas camadas
 
-### Híbrido confiável (recomendado)
+As imagens JPEG passam por dois motores locais:
 
-Faz uma leitura estruturada da página inteira por visão e mantém o OCR local
-como apoio. A planilha é fornecida ao leitor visual somente para associar o
-card ao código correto: preço, descrição e unidade precisam ser lidos na
-imagem, e campos ilegíveis ou ausentes retornam vazios.
+1. Tesseract com modelos em português e inglês, múltiplos tratamentos de
+   contraste e diferentes modos de segmentação;
+2. RapidOCR com ONNX Runtime, usado como uma segunda leitura neural dos cards e
+   dos preços.
 
-Esse modo usa a API da OpenAI e gera consumo na conta correspondente. Configure
-os Secrets do Streamlit:
+Os cards são recortados antes da leitura e associados aos itens da planilha de
+forma global e exclusiva. Um mesmo card não pode aprovar dois produtos. A
+descrição, a unidade e cada preço mantêm evidências independentes.
 
-```toml
-[openai]
-api_key = "sk-..."
-modelo = "gpt-5.6"
-```
-
-Também é possível usar as variáveis `OPENAI_API_KEY` e
-`OPENAI_VISION_MODEL`.
-
-### Somente OCR local
-
-Não usa API externa. É útil como alternativa, mas textos e preços pequenos em
-artes densas podem permanecer como `REVISAR`. O Tesseract precisa estar no
-`PATH`, com português e inglês. No Streamlit Community Cloud, o
-`packages.txt` instala os pacotes necessários.
+O segundo motor é carregado uma única vez pelo servidor. A primeira conferência
+depois que o aplicativo reinicia pode demorar mais; as seguintes reutilizam o
+modelo em memória.
 
 ## Configuração do acesso
 
-Além da seção `openai`, mantenha nos Secrets as configurações já usadas pelo
-aplicativo:
+Configure os Secrets do Streamlit:
 
 ```toml
 [cookie]
@@ -85,6 +73,9 @@ usuario = "ADMIN"
 ```
 
 ## Execução local
+
+O Tesseract precisa estar no `PATH`. No Streamlit Community Cloud, o
+`packages.txt` instala os idiomas necessários.
 
 ```bash
 pip install -r requirements.txt
