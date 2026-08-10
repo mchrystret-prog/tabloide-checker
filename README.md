@@ -30,7 +30,14 @@ precisa estar instalado no sistema e disponível no `PATH`, com os idiomas
 português e inglês. No Streamlit Community Cloud, o arquivo `packages.txt`
 incluído no projeto instala esses componentes automaticamente.
 
-A leitura de JPEG combina OCR de descrições com uma etapa dedicada às faixas
-verdes de preço. Por ser reconhecimento de imagem, casos de baixa confiança são
-marcados como `REVISAR` em vez de serem classificados automaticamente como uma
-divergência confirmada.
+A leitura de JPEG combina OCR de descrições com uma etapa adaptativa dedicada
+às faixas verdes de preço. A partir da versão 1.8, faixas que ocupam apenas uma
+pequena parte da largura da página também são detectadas, e cada preço passa por
+mais de um tratamento de contraste antes da leitura.
+
+O resultado `OK` exige duas evidências: descrição reconhecida com score mínimo
+e preço principal exato identificado na página provável. Quando uma das duas
+evidências não é conclusiva, o item permanece como `REVISAR`; o sistema não
+transforma incerteza de OCR em divergência confirmada. O relatório também exibe
+as colunas `Confiança`, `Preço reconhecido OCR` e `Evidências`, além de um
+diagnóstico de cobertura dos preços na tela.

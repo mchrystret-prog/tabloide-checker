@@ -12,7 +12,7 @@ from pypdf import PdfReader
 from rapidfuzz import fuzz
 from streamlit_cookies_manager import EncryptedCookieManager
 
-from ocr_utils import abrir_imagem_jpeg, extrair_texto_jpeg
+from ocr_utils import abrir_imagem_jpeg, analisar_jpeg
 from planilha_utils import ler_planilha_normalizada
 
 
@@ -22,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.7.0"
+VERSAO = "1.8.0"
 
 
 def obter_senha_cookie():
@@ -167,6 +167,9 @@ if "metricas" not in st.session_state:
 if "documento_preview" not in st.session_state:
     st.session_state.documento_preview = None
 
+if "ocr_diagnostico" not in st.session_state:
+    st.session_state.ocr_diagnostico = None
+
 
 def formatar_preco(valor):
     if pd.isna(valor):
@@ -258,11 +261,14 @@ def carregar_jpegs(arquivos):
 
     for i, arquivo in enumerate(arquivos):
         imagem = abrir_imagem_jpeg(arquivo)
-        texto_limpo = limpar_texto(extrair_texto_jpeg(imagem))
+        analise = analisar_jpeg(imagem)
+        texto_limpo = limpar_texto(analise["texto"])
 
         paginas.append({
             "pagina": i + 1,
-            "texto": texto_limpo
+            "texto": texto_limpo,
+            "precos_promocionais": analise["precos_promocionais"],
+            "blocos_promocionais": analise["blocos"],
         })
 
     return paginas
@@ -375,6 +381,13 @@ def pegar_texto_pagina(numero_pagina, paginas):
     return ""
 
 
+def pegar_dados_pagina(numero_pagina, paginas):
+    for pagina in paginas:
+        if pagina["pagina"] == numero_pagina:
+            return pagina
+    return {"texto": "", "precos_promocionais": [], "blocos_promocionais": []}
+
+
 def classificar_descricao(score, limiar_ok=85):
     if score >= limiar_ok:
         return "OK"
@@ -434,6 +447,9 @@ def conferir(df, paginas, tipo_documento="PDF"):
                 "Preço Regular XLSX": row["preco_regular_fmt"],
                 "CooperMais XLSX": row["coopermais_fmt"],
                 "Regra especial": "Produto listado no bloco EXCLUÍDOS",
+                "Confiança": "-",
+                "Preço reconhecido OCR": "-",
+                "Evidências": "Produto excluído da conferência",
                 "Score descrição": "-",
                 "Apontamentos": "Produto excluído"
             })
@@ -452,7 +468,8 @@ def conferir(df, paginas, tipo_documento="PDF"):
         )
 
         pagina, score = encontrar_pagina(descricao, paginas, modo_ocr)
-        texto_pagina = pegar_texto_pagina(pagina, paginas)
+        dados_pagina = pegar_dados_pagina(pagina, paginas)
+        texto_pagina = dados_pagina["texto"]
 
         status_descricao = classificar_descricao(
             score,
@@ -496,8 +513,23 @@ def conferir(df, paginas, tipo_documento="PDF"):
                 else "Produto da grade não encontrado no PDF"
             )
 
+        confianca = ""
+        preco_reconhecido_ocr = ""
+        evidencias = []
+
         if modo_ocr:
-            preco_principal_ok = coopermais_ok if coopermais else preco_regular_ok
+            preco_principal = coopermais if coopermais else preco_regular
+            precos_promocionais = set(dados_pagina.get("precos_promocionais", []))
+            preco_principal_ok = preco_principal in precos_promocionais
+
+            if score >= 80:
+                evidencias.append(f"Descrição reconhecida ({score:.1f}%)")
+            elif score >= 60:
+                evidencias.append(f"Descrição parcial ({score:.1f}%)")
+
+            if preco_principal_ok:
+                preco_reconhecido_ocr = preco_principal
+                evidencias.append(f"Preço exato reconhecido ({preco_principal})")
 
             if not preco_principal_ok:
                 apontamentos.append("Preço principal não reconhecido pelo OCR")
@@ -505,6 +537,7 @@ def conferir(df, paginas, tipo_documento="PDF"):
             if status_descricao == "DIVERGÊNCIA":
                 status_final = "DIVERGÊNCIA"
                 motivo_principal = "Produto não reconhecido nas imagens JPEG"
+                confianca = "Baixa"
             elif status_descricao == "REVISAR" or not preco_principal_ok:
                 status_final = "REVISAR"
                 motivo_principal = (
@@ -512,9 +545,11 @@ def conferir(df, paginas, tipo_documento="PDF"):
                     if status_descricao == "REVISAR"
                     else "Revisar preço não reconhecido pelo OCR"
                 )
+                confianca = "Média" if score >= 80 else "Baixa"
             else:
                 status_final = "OK"
                 motivo_principal = ""
+                confianca = "Alta"
         else:
             if not unidade_ok:
                 apontamentos.append("Unidade de medida não encontrada na página do produto")
@@ -545,6 +580,8 @@ def conferir(df, paginas, tipo_documento="PDF"):
                 status_descricao,
                 apontamentos
             )
+            confianca = "Alta" if status_final == "OK" else "Baixa"
+            evidencias.append(f"Descrição reconhecida ({score:.1f}%)")
 
         if tipo_item == "INCLUÍDO" and status_final == "OK":
             motivo_principal = "Produto incluído conferido"
@@ -570,6 +607,9 @@ def conferir(df, paginas, tipo_documento="PDF"):
                     else ""
                 )
             ),
+            "Confiança": confianca,
+            "Preço reconhecido OCR": preco_reconhecido_ocr,
+            "Evidências": "; ".join(evidencias),
             "Score descrição": round(score, 2),
             "Apontamentos": "; ".join(apontamentos)
         })
@@ -822,6 +862,22 @@ if pagina == "🏠 Conferência":
                 "incluidos": incluidos
             }
 
+            if tipo_documento == "JPEG":
+                precos_unicos = sorted({
+                    preco
+                    for dados in paginas
+                    for preco in dados.get("precos_promocionais", [])
+                })
+                st.session_state.ocr_diagnostico = {
+                    "precos_unicos": len(precos_unicos),
+                    "itens_com_preco_exato": int(
+                        resultado["Preço reconhecido OCR"].astype(bool).sum()
+                    ),
+                    "paginas": len(paginas),
+                }
+            else:
+                st.session_state.ocr_diagnostico = None
+
             salvar_historico(
                 st.session_state.usuario,
                 xlsx_file.name if xlsx_file else "",
@@ -845,6 +901,27 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
     col6.metric("Divergências", metricas["divergencias"])
     col7.metric("Excluídos", metricas["excluidos"])
     col8.metric("Incluídos", metricas["incluidos"])
+
+    if st.session_state.ocr_diagnostico is not None:
+        diagnostico = st.session_state.ocr_diagnostico
+        cobertura = (
+            diagnostico["itens_com_preco_exato"] / metricas["total"]
+            if metricas["total"]
+            else 0
+        )
+        st.caption(
+            "Diagnóstico do OCR: "
+            f"{diagnostico['precos_unicos']} preços distintos identificados em "
+            f"{diagnostico['paginas']} página(s); "
+            f"{diagnostico['itens_com_preco_exato']} item(ns) com preço exato confirmado."
+        )
+        if metricas["total"] >= 10 and cobertura < 0.25:
+            st.warning(
+                "A leitura de preços ficou abaixo do nível mínimo esperado. "
+                "O resultado foi mantido como REVISAR e não deve ser tratado "
+                "como divergência confirmada. Confira a resolução das imagens "
+                "ou execute novamente antes de aprovar o tabloide."
+            )
 
     st.subheader("Resultado da conferência")
 
