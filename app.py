@@ -12,6 +12,8 @@ from pypdf import PdfReader
 from rapidfuzz import fuzz
 from streamlit_cookies_manager import EncryptedCookieManager
 
+from ocr_utils import abrir_imagem_jpeg, extrair_texto_jpeg
+
 
 st.set_page_config(
     page_title="Tabloide Checker",
@@ -19,7 +21,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.4.0"
+VERSAO = "1.5.0"
 
 
 def obter_senha_cookie():
@@ -161,8 +163,8 @@ if "ignorados" not in st.session_state:
 if "metricas" not in st.session_state:
     st.session_state.metricas = None
 
-if "pdf_bytes" not in st.session_state:
-    st.session_state.pdf_bytes = None
+if "documento_preview" not in st.session_state:
+    st.session_state.documento_preview = None
 
 
 def remover_acentos(texto):
@@ -322,6 +324,42 @@ def carregar_pdf(arquivo):
     return paginas
 
 
+def carregar_jpegs(arquivos):
+    """Executa OCR e transforma cada JPEG em uma página pesquisável."""
+    paginas = []
+
+    for i, arquivo in enumerate(arquivos):
+        imagem = abrir_imagem_jpeg(arquivo)
+        texto_limpo = limpar_texto(extrair_texto_jpeg(imagem))
+
+        paginas.append({
+            "pagina": i + 1,
+            "texto": texto_limpo
+        })
+
+    return paginas
+
+
+def carregar_documento(arquivos):
+    """Lê um PDF ou uma sequência de imagens JPEG."""
+    if not arquivos:
+        raise ValueError("Nenhum arquivo do tabloide foi enviado.")
+
+    extensoes = [os.path.splitext(arquivo.name)[1].lower() for arquivo in arquivos]
+    tem_pdf = any(extensao == ".pdf" for extensao in extensoes)
+    tem_jpeg = any(extensao in (".jpg", ".jpeg") for extensao in extensoes)
+
+    if tem_pdf and tem_jpeg:
+        raise ValueError("Envie um PDF ou imagens JPEG, sem misturar os formatos.")
+
+    if tem_pdf:
+        if len(arquivos) != 1:
+            raise ValueError("Envie apenas um PDF por conferência.")
+        return carregar_pdf(arquivos[0]), "PDF"
+
+    return carregar_jpegs(arquivos), "JPEG"
+
+
 def gerar_preview_pagina(pdf_bytes, numero_pagina):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = doc.load_page(numero_pagina - 1)
@@ -332,6 +370,14 @@ def gerar_preview_pagina(pdf_bytes, numero_pagina):
 
     doc.close()
     return img
+
+
+def gerar_preview_documento(documento_preview, numero_pagina):
+    if documento_preview["tipo"] == "PDF":
+        return gerar_preview_pagina(documento_preview["pdf_bytes"], numero_pagina)
+
+    imagem_bytes = documento_preview["imagens_bytes"][numero_pagina - 1]
+    return Image.open(BytesIO(imagem_bytes)).convert("RGB")
 
 
 def preco_na_pagina(preco, texto_pagina):
@@ -720,28 +766,52 @@ if pagina == "📋 Histórico":
 
 
 xlsx_file = None
-pdf_file = None
+tabloide_files = None
 
 if pagina == "🏠 Conferência":
     xlsx_file = st.file_uploader("Selecione a grade de ofertas XLSX", type=["xlsx"])
-    pdf_file = st.file_uploader("Selecione o PDF exportado do InDesign", type=["pdf"])
+    tabloide_files = st.file_uploader(
+        "Selecione o tabloide em PDF ou JPEG",
+        type=["pdf", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        help=(
+            "Para PDF, envie um único arquivo. Para JPEG, você pode selecionar "
+            "várias imagens; a ordem dos arquivos definirá a numeração das páginas."
+        )
+    )
 
     if st.button("Conferir tabloide"):
-        if not xlsx_file or not pdf_file:
-            st.warning("Envie o XLSX e o PDF para iniciar a conferência.")
+        if not xlsx_file or not tabloide_files:
+            st.warning("Envie o XLSX e o tabloide em PDF ou JPEG para iniciar a conferência.")
         else:
-            with st.spinner("Lendo XLSX..."):
-                df, total_antes, total_ignorados, ignorados = carregar_xlsx(xlsx_file)
+            try:
+                with st.spinner("Lendo XLSX..."):
+                    df, total_antes, total_ignorados, ignorados = carregar_xlsx(xlsx_file)
 
-            with st.spinner("Lendo PDF..."):
-                paginas = carregar_pdf(pdf_file)
+                with st.spinner("Lendo o tabloide e reconhecendo os textos..."):
+                    paginas, tipo_documento = carregar_documento(tabloide_files)
 
-            pdf_file.seek(0)
-            st.session_state.pdf_bytes = pdf_file.read()
-            pdf_file.seek(0)
+                if tipo_documento == "PDF":
+                    tabloide_files[0].seek(0)
+                    st.session_state.documento_preview = {
+                        "tipo": "PDF",
+                        "pdf_bytes": tabloide_files[0].read()
+                    }
+                else:
+                    imagens_bytes = []
+                    for arquivo in tabloide_files:
+                        arquivo.seek(0)
+                        imagens_bytes.append(arquivo.read())
+                    st.session_state.documento_preview = {
+                        "tipo": "JPEG",
+                        "imagens_bytes": imagens_bytes
+                    }
 
-            with st.spinner("Comparando dados..."):
-                resultado = conferir(df, paginas)
+                with st.spinner("Comparando dados..."):
+                    resultado = conferir(df, paginas)
+            except Exception as erro:
+                st.error(f"Não foi possível processar os arquivos: {erro}")
+                st.stop()
 
             resultado["Página provável"] = resultado["Página provável"].astype(str)
             resultado["Score descrição"] = resultado["Score descrição"].astype(str)
@@ -769,7 +839,7 @@ if pagina == "🏠 Conferência":
             salvar_historico(
                 st.session_state.usuario,
                 xlsx_file.name if xlsx_file else "",
-                pdf_file.name if pdf_file else "",
+                ", ".join(arquivo.name for arquivo in tabloide_files),
                 st.session_state.metricas
             )
 
@@ -823,7 +893,7 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
         use_container_width=True
     )
 
-    if st.session_state.pdf_bytes is not None:
+    if st.session_state.documento_preview is not None:
         paginas_disponiveis = []
 
         for p in tabela["Página provável"].dropna().unique():
@@ -835,13 +905,13 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
         paginas_disponiveis = sorted(set(paginas_disponiveis))
 
         if paginas_disponiveis:
-            st.subheader("Visualizar página do PDF")
+            st.subheader("Visualizar página do tabloide")
 
             pagina_escolhida = st.selectbox("Selecione a página", paginas_disponiveis)
 
-            with st.spinner("Carregando página do PDF..."):
-                imagem_pagina = gerar_preview_pagina(
-                    st.session_state.pdf_bytes,
+            with st.spinner("Carregando página do tabloide..."):
+                imagem_pagina = gerar_preview_documento(
+                    st.session_state.documento_preview,
                     pagina_escolhida
                 )
 
