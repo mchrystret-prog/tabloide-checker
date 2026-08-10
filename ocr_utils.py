@@ -160,9 +160,151 @@ def _ocr_preco_binario(binaria, psm):
     )
 
 
+def _componentes_conectados(binaria):
+    """Retorna caixas dos elementos pretos sem exigir OpenCV/SciPy."""
+    primeiro_plano = binaria < 128
+    altura, largura = primeiro_plano.shape
+    visitado = np.zeros_like(primeiro_plano, dtype=bool)
+    componentes = []
+
+    for y in range(altura):
+        for x in range(largura):
+            if not primeiro_plano[y, x] or visitado[y, x]:
+                continue
+            pilha = [(x, y)]
+            visitado[y, x] = True
+            minimo_x = maximo_x = x
+            minimo_y = maximo_y = y
+            area = 0
+
+            while pilha:
+                atual_x, atual_y = pilha.pop()
+                area += 1
+                minimo_x = min(minimo_x, atual_x)
+                maximo_x = max(maximo_x, atual_x)
+                minimo_y = min(minimo_y, atual_y)
+                maximo_y = max(maximo_y, atual_y)
+
+                for proximo_x, proximo_y in (
+                    (atual_x - 1, atual_y),
+                    (atual_x + 1, atual_y),
+                    (atual_x, atual_y - 1),
+                    (atual_x, atual_y + 1),
+                ):
+                    if (
+                        0 <= proximo_x < largura
+                        and 0 <= proximo_y < altura
+                        and primeiro_plano[proximo_y, proximo_x]
+                        and not visitado[proximo_y, proximo_x]
+                    ):
+                        visitado[proximo_y, proximo_x] = True
+                        pilha.append((proximo_x, proximo_y))
+
+            if area >= 8:
+                componentes.append(
+                    (minimo_x, minimo_y, maximo_x + 1, maximo_y + 1, area)
+                )
+
+    return componentes
+
+
+def _preco_por_componentes(recorte):
+    """Separa reais e centavos pela diferença de tamanho tipográfico."""
+    binaria = _mascaras_digitos(recorte)[0]
+    altura, largura = binaria.shape
+    componentes = [
+        componente
+        for componente in _componentes_conectados(binaria)
+        if componente[0] > largura * 0.12
+        and componente[4] >= max(12, altura * largura * 0.0003)
+    ]
+    if not componentes:
+        return set()
+
+    maior_altura = max(y2 - y1 for _, y1, _, y2, _ in componentes)
+    grandes = [
+        componente
+        for componente in componentes
+        if componente[3] - componente[1] >= maior_altura * 0.68
+    ]
+    if not grandes:
+        return set()
+
+    grandes.sort(key=lambda item: item[0])
+    # Mantém a sequência de algarismos grandes mais à direita, descartando R$.
+    ultimo_x = grandes[-1][2]
+    sequencia = [c for c in grandes if c[0] >= grandes[-1][0] - largura * 0.42]
+    x1 = min(c[0] for c in sequencia)
+    y1 = min(c[1] for c in sequencia)
+    x2 = max(c[2] for c in sequencia)
+    y2 = max(c[3] for c in sequencia)
+
+    menores = [
+        componente
+        for componente in componentes
+        if componente[0] >= ultimo_x - 2
+        and maior_altura * 0.25 <= componente[3] - componente[1] <= maior_altura * 0.67
+    ]
+    menores = sorted(menores, key=lambda item: (-item[4], item[0]))[:2]
+    if len(menores) < 2:
+        return set()
+    menores.sort(key=lambda item: item[0])
+
+    margem = max(3, int(altura * 0.06))
+    inteiro_img = binaria[
+        max(0, y1 - margem) : min(altura, y2 + margem),
+        max(0, x1 - margem) : min(largura, x2 + margem),
+    ]
+    cx1 = min(c[0] for c in menores)
+    cy1 = min(c[1] for c in menores)
+    cx2 = max(c[2] for c in menores)
+    cy2 = max(c[3] for c in menores)
+    centavos_img = binaria[
+        max(0, cy1 - margem) : min(altura, cy2 + margem),
+        max(0, cx1 - margem) : min(largura, cx2 + margem),
+    ]
+
+    inteiro = re.sub(r"\D", "", _ocr_preco_binario(inteiro_img, 7))
+    centavos = re.sub(r"\D", "", _ocr_preco_binario(centavos_img, 7))
+    if not (1 <= len(inteiro) <= 3 and len(centavos) >= 2):
+        return set()
+    preco = _normalizar_preco(inteiro, centavos[-2:])
+    return {preco} if preco else set()
+
+
+def _reconhecer_precos_regulares(imagem, caixa_preco):
+    """Lê a linha pequena posicionada logo abaixo da faixa promocional."""
+    x1, _, x2, y2 = caixa_preco
+    altura_pagina = imagem.height
+    base = min(altura_pagina, y2 + int(altura_pagina * 0.048))
+    if base <= y2:
+        return []
+
+    recorte = imagem.crop((x1, y2, x2, base))
+    tratado = ImageOps.autocontrast(ImageOps.grayscale(recorte))
+    textos = []
+    for psm in (7, 11):
+        textos.append(
+            pytesseract.image_to_string(
+                tratado.resize(
+                    (tratado.width * 4, tratado.height * 4),
+                    Image.Resampling.LANCZOS,
+                ),
+                lang="eng",
+                config=(
+                    f"--oem 3 --psm {psm} "
+                    "-c tessedit_char_whitelist=0123456789,."
+                ),
+                timeout=60,
+            )
+        )
+    return sorted({preco for texto in textos for preco in _precos_do_texto(texto)})
+
+
 def _reconhecer_preco_recorte(recorte):
     precos_com_separador = set()
     votos = Counter()
+    precos_com_separador.update(_preco_por_componentes(recorte))
     for binaria in _mascaras_digitos(recorte)[:2]:
         for psm in (7, 11):
             texto = _ocr_preco_binario(binaria, psm)
@@ -203,72 +345,146 @@ def _reconhecer_preco_recorte(recorte):
     confirmados = precos_com_separador | {
         preco for preco, quantidade in votos.items() if quantidade >= 2
     }
+    # Logos e o símbolo R$ podem grudar um algarismo espúrio à esquerda.
+    # Mantemos também os dois últimos algarismos da parte inteira nesses casos;
+    # a etapa de comparação ainda exige igualdade exata com a planilha.
+    reduzidos = set()
+    for preco in confirmados:
+        inteiro, centavos = preco.split(",")
+        if len(inteiro) == 3 and int(inteiro) >= 300:
+            reduzido = _normalizar_preco(inteiro[-2:], centavos)
+            if reduzido:
+                reduzidos.add(reduzido)
+    confirmados.update(reduzidos)
     return sorted(confirmados)
 
 
 def _detectar_faixas_verdes(imagem):
-    """Localiza faixas promocionais mesmo quando ocupam pouco da página."""
-    array = np.asarray(imagem)
+    """Localiza faixas claras e caixas escuras de preço promocional."""
+    array = np.asarray(imagem).astype(np.int16)
     altura_pagina, largura_pagina = array.shape[:2]
-    dominante = (
-        (array[:, :, 1].astype(np.int16) > array[:, :, 0].astype(np.int16) + 8)
-        & (array[:, :, 1].astype(np.int16) > array[:, :, 2].astype(np.int16) + 8)
-    )
-    amplitude = array.max(axis=2).astype(np.int16) - array.min(axis=2).astype(np.int16)
-    verde_valido = (
-        (array[:, :, 1] > 45)
-        & (amplitude > 20)
-    )
-    mascara = (dominante & verde_valido).astype("uint8")
+    vermelho = array[:, :, 0]
+    verde = array[:, :, 1]
+    azul = array[:, :, 2]
+    amplitude = array.max(axis=2) - array.min(axis=2)
 
-    # O limite anterior exigia verde em 20% da largura. Em alguns tabloides,
-    # uma faixa individual ocupa menos que isso; 2% encontra a linha e os
-    # filtros geométricos abaixo removem elementos decorativos.
-    linhas = agrupar_intervalos(
-        mascara.sum(axis=1) > largura_pagina * 0.02,
-        max(12, int(altura_pagina * 0.006)),
-    )
+    mascaras = [
+        # Verde-limão usado nas grades de CooperMais.
+        (verde > 125)
+        & (verde > vermelho + 18)
+        & (verde > azul + 35)
+        & (vermelho > 35),
+        # Verde escuro usado nos cards de carnes e nos destaques grandes.
+        (verde > 42)
+        & (verde < 145)
+        & (verde > vermelho + 6)
+        & (verde > azul + 6)
+        & (amplitude > 18),
+    ]
 
     caixas = []
-    for y1, y2 in linhas:
-        altura = y2 - y1
-        if altura < altura_pagina * 0.006 or altura > altura_pagina * 0.13:
-            continue
+    for mascara in mascaras:
+        # Fundos verdes nas bordas não podem unir todas as linhas da página.
+        mascara[:, : int(largura_pagina * 0.03)] = False
+        mascara[:, int(largura_pagina * 0.97) :] = False
 
-        colunas = agrupar_intervalos(
-            mascara[y1:y2].sum(axis=0) > max(2, altura * 0.035),
-            max(45, int(largura_pagina * 0.035)),
+        linhas = agrupar_intervalos(
+            mascara.sum(axis=1) > largura_pagina * 0.015,
+            max(10, int(altura_pagina * 0.004)),
         )
-        for x1, x2 in colunas:
-            largura = x2 - x1
-            densidade = mascara[y1:y2, x1:x2].mean()
-            if largura < largura_pagina * 0.035 or densidade < 0.12:
+
+        for y1, y2 in linhas:
+            altura = y2 - y1
+            if altura < altura_pagina * 0.004 or altura > altura_pagina * 0.12:
                 continue
 
-            margem_x = max(3, int(largura * 0.03))
-            margem_y = max(2, int(altura * 0.08))
-            caixas.append(
-                (
-                    max(0, x1 - margem_x),
-                    max(0, y1 - margem_y),
-                    min(largura_pagina, x2 + margem_x),
-                    min(altura_pagina, y2 + margem_y),
-                )
+            colunas = agrupar_intervalos(
+                mascara[y1:y2].sum(axis=0) > max(2, altura * 0.04),
+                max(40, int(largura_pagina * 0.025)),
             )
+            for x1, x2 in colunas:
+                largura = x2 - x1
+                densidade = mascara[y1:y2, x1:x2].mean()
+                proporcao = largura / max(altura, 1)
+                if (
+                    largura < largura_pagina * 0.025
+                    or largura > largura_pagina * 0.50
+                    or densidade < 0.10
+                    or proporcao < 2.0
+                ):
+                    continue
+                caixas.append((int(x1), int(y1), int(x2), int(y2)))
 
-    return caixas
+    # Remove detecções duplicadas do mesmo bloco feitas pelas duas máscaras.
+    unicas = []
+    por_area = sorted(
+        caixas,
+        key=lambda item: (item[2] - item[0]) * (item[3] - item[1]),
+        reverse=True,
+    )
+    for caixa in por_area:
+        x1, y1, x2, y2 = caixa
+        duplicada = False
+        for ux1, uy1, ux2, uy2 in unicas:
+            inter_x = max(0, min(x2, ux2) - max(x1, ux1))
+            inter_y = max(0, min(y2, uy2) - max(y1, uy1))
+            intersecao = inter_x * inter_y
+            menor_area = min((x2 - x1) * (y2 - y1), (ux2 - ux1) * (uy2 - uy1))
+            if menor_area and intersecao / menor_area > 0.55:
+                duplicada = True
+                break
+        if not duplicada:
+            unicas.append(caixa)
+
+    return sorted(unicas, key=lambda item: (item[1], item[0]))
+
+
+def _caixa_card(caixa_preco, tamanho_pagina):
+    """Expande a faixa para incluir descrição, unidade e preço regular."""
+    largura_pagina, altura_pagina = tamanho_pagina
+    x1, y1, x2, y2 = caixa_preco
+    largura = x2 - x1
+
+    margem_x = max(int(largura * 0.16), int(largura_pagina * 0.012))
+    topo = max(0, y1 - int(altura_pagina * 0.145))
+    base = min(altura_pagina, y2 + int(altura_pagina * 0.045))
+    return (
+        max(0, x1 - margem_x),
+        topo,
+        min(largura_pagina, x2 + margem_x),
+        base,
+    )
 
 
 def extrair_blocos_promocionais(imagem):
-    """Retorna cada faixa verde e os preços reconhecidos nela."""
+    """Retorna evidências espacialmente vinculadas a cada card."""
     imagem_ocr = redimensionar_para_ocr(imagem, maior_alvo=3200, escala_maxima=2.0)
     blocos = []
 
     for caixa in _detectar_faixas_verdes(imagem_ocr):
         recorte = imagem_ocr.crop(caixa)
         precos = _reconhecer_preco_recorte(recorte)
-        if precos:
-            blocos.append({"caixa": caixa, "precos": precos})
+        caixa_card = _caixa_card(caixa, imagem_ocr.size)
+        recorte_card = imagem_ocr.crop(caixa_card)
+        texto_card_colorido = executar_ocr_texto(
+            recorte_card,
+            configuracao="--oem 3 --psm 11",
+        )
+        texto_card_tratado = executar_ocr_texto(
+            preparar_imagem_ocr(recorte_card),
+            configuracao="--oem 3 --psm 6",
+        )
+        texto_card = "\n".join([texto_card_colorido, texto_card_tratado])
+        precos_regulares = _reconhecer_precos_regulares(imagem_ocr, caixa)
+        precos_card = sorted(set(_precos_do_texto(texto_card)) | set(precos_regulares))
+        blocos.append({
+            "caixa": caixa,
+            "caixa_card": caixa_card,
+            "texto": texto_card,
+            "precos": precos,
+            "precos_card": precos_card,
+            "precos_regulares": precos_regulares,
+        })
 
     return blocos
 

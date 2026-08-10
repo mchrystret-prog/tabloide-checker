@@ -122,6 +122,52 @@ def ler_modelo_tabaloide_digital(excel, aba):
     return df[COLUNAS_NORMALIZADAS]
 
 
+def ler_modelo_tabaloide_marketing(excel, aba):
+    """Lê a lista simples, sem cabeçalho, usada no verso do tabloide."""
+    origem = pd.read_excel(excel, sheet_name=aba, header=None)
+    origem = origem[origem.iloc[:, 0].apply(lambda valor: str(valor).strip().isdigit())]
+
+    df = pd.DataFrame(index=origem.index)
+    df["Aba"] = aba
+    df["Tipo"] = "NORMAL"
+    df["Código"] = origem.iloc[:, 0]
+    df["Descrição"] = origem.iloc[:, 1]
+    df["Embalagem"] = origem.iloc[:, 2]
+    df["Unid.Medida"] = origem.iloc[:, 3]
+    df["PREÇO"] = origem.iloc[:, 4]
+    df["COOPERMAIS"] = origem.iloc[:, 5]
+    return df[COLUNAS_NORMALIZADAS]
+
+
+def ler_modelo_lista_ofertas(excel, aba):
+    """Lê a lista FLV cujo cabeçalho começa em 'Cód. Produto'."""
+    origem = pd.read_excel(excel, sheet_name=aba, header=None)
+    linha_cabecalho = None
+
+    for indice, valor in origem.iloc[:, 0].items():
+        if "COD. PRODUTO" in normalizar_nome(valor):
+            linha_cabecalho = indice
+            break
+
+    if linha_cabecalho is None:
+        raise ValueError("Cabeçalho da Lista de Ofertas não encontrado.")
+
+    dados = origem.iloc[linha_cabecalho + 1 :].copy()
+    dados = dados[dados.iloc[:, 0].apply(lambda valor: str(valor).strip().isdigit())]
+
+    df = pd.DataFrame(index=dados.index)
+    df["Aba"] = aba
+    df["Tipo"] = "NORMAL"
+    df["Código"] = dados.iloc[:, 0]
+    # A terceira coluna contém o descritivo já preparado para a comunicação.
+    df["Descrição"] = dados.iloc[:, 2].where(dados.iloc[:, 2].notna(), dados.iloc[:, 1])
+    df["Embalagem"] = dados.iloc[:, 3]
+    df["Unid.Medida"] = dados.iloc[:, 4]
+    df["PREÇO"] = dados.iloc[:, 5]
+    df["COOPERMAIS"] = dados.iloc[:, 6]
+    return df[COLUNAS_NORMALIZADAS]
+
+
 def ler_modelo_legado(excel):
     dataframes = []
     aba_agencia = encontrar_aba_por_nome(excel, "Agência")
@@ -167,5 +213,15 @@ def ler_planilha_normalizada(arquivo):
             ler_modelo_tabaloide_digital(excel, aba_digital),
             "Tabloide Digital",
         )
+
+    for aba in excel.sheet_names:
+        amostra = pd.read_excel(excel, sheet_name=aba, header=None, nrows=5)
+        primeira_coluna = " ".join(normalizar_nome(valor) for valor in amostra.iloc[:, 0])
+
+        if "COD. PRODUTO" in primeira_coluna:
+            return ler_modelo_lista_ofertas(excel, aba), "Lista de Ofertas FLV"
+
+        if normalizar_nome(aba) == "TABLOIDE MARKETING" and amostra.shape[1] >= 6:
+            return ler_modelo_tabaloide_marketing(excel, aba), "Tabloide Marketing"
 
     return ler_modelo_legado(excel), "Agência/FLV"

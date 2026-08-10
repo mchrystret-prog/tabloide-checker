@@ -14,6 +14,7 @@ from streamlit_cookies_manager import EncryptedCookieManager
 
 from ocr_utils import abrir_imagem_jpeg, analisar_jpeg
 from planilha_utils import ler_planilha_normalizada
+from vision_utils import analisar_pagina_com_visao, obter_configuracao_openai
 
 
 st.set_page_config(
@@ -22,7 +23,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.8.0"
+VERSAO = "2.0.0"
 
 
 def obter_senha_cookie():
@@ -211,7 +212,9 @@ def carregar_xlsx(arquivo):
     df = df.dropna(subset=["Descrição"])
     df = df[df["Tipo"] != "SEPARADOR"].copy()
 
-    df = df[pd.to_numeric(df["PREÇO"], errors="coerce").notna()].copy()
+    tem_preco_regular = pd.to_numeric(df["PREÇO"], errors="coerce").notna()
+    tem_coopermais = pd.to_numeric(df["COOPERMAIS"], errors="coerce").notna()
+    df = df[tem_preco_regular | tem_coopermais].copy()
 
     total_antes = len(df)
 
@@ -239,6 +242,32 @@ def carregar_xlsx(arquivo):
     return df, total_antes, total_ignorados, ignorados, modelo_planilha
 
 
+def carregar_planilhas(arquivos):
+    """Combina uma ou mais grades, preservando o modelo de cada arquivo."""
+    partes = []
+    ignorados_partes = []
+    modelos = []
+    total_antes = 0
+    total_ignorados = 0
+
+    for arquivo in arquivos:
+        df, antes, ignorados_total, ignorados, modelo = carregar_xlsx(arquivo)
+        partes.append(df)
+        total_antes += antes
+        total_ignorados += ignorados_total
+        modelos.append(f"{arquivo.name}: {modelo}")
+        if ignorados is not None and not ignorados.empty:
+            ignorados_partes.append(ignorados)
+
+    combinado = pd.concat(partes, ignore_index=True)
+    ignorados = (
+        pd.concat(ignorados_partes, ignore_index=True)
+        if ignorados_partes
+        else pd.DataFrame()
+    )
+    return combinado, total_antes, total_ignorados, ignorados, modelos
+
+
 def carregar_pdf(arquivo):
     reader = PdfReader(arquivo)
     paginas = []
@@ -255,7 +284,7 @@ def carregar_pdf(arquivo):
     return paginas
 
 
-def carregar_jpegs(arquivos):
+def carregar_jpegs(arquivos, df=None, usar_visao=False):
     """Executa OCR e transforma cada JPEG em uma página pesquisável."""
     paginas = []
 
@@ -263,18 +292,25 @@ def carregar_jpegs(arquivos):
         imagem = abrir_imagem_jpeg(arquivo)
         analise = analisar_jpeg(imagem)
         texto_limpo = limpar_texto(analise["texto"])
+        cards_visao = (
+            analisar_pagina_com_visao(imagem, df, i + 1)
+            if usar_visao and df is not None
+            else []
+        )
 
         paginas.append({
             "pagina": i + 1,
             "texto": texto_limpo,
             "precos_promocionais": analise["precos_promocionais"],
             "blocos_promocionais": analise["blocos"],
+            "cards_visao": cards_visao,
+            "modo_visao": usar_visao,
         })
 
     return paginas
 
 
-def carregar_documento(arquivos):
+def carregar_documento(arquivos, df=None, usar_visao=False):
     """Lê um PDF ou uma sequência de imagens JPEG."""
     if not arquivos:
         raise ValueError("Nenhum arquivo do tabloide foi enviado.")
@@ -291,7 +327,7 @@ def carregar_documento(arquivos):
             raise ValueError("Envie apenas um PDF por conferência.")
         return carregar_pdf(arquivos[0]), "PDF"
 
-    return carregar_jpegs(arquivos), "JPEG"
+    return carregar_jpegs(arquivos, df=df, usar_visao=usar_visao), "JPEG"
 
 
 def gerar_preview_pagina(pdf_bytes, numero_pagina):
@@ -388,6 +424,62 @@ def pegar_dados_pagina(numero_pagina, paginas):
     return {"texto": "", "precos_promocionais": [], "blocos_promocionais": []}
 
 
+def encontrar_bloco_produto(descricao, dados_pagina):
+    """Encontra o card cuja descrição mais se aproxima do item da grade."""
+    melhor_bloco = None
+    melhor_score = 0
+    descricao_normalizada = texto_comparacao(descricao)
+
+    for bloco in dados_pagina.get("blocos_promocionais", []):
+        score = fuzz.token_set_ratio(
+            descricao_normalizada,
+            texto_comparacao(bloco.get("texto", "")),
+        )
+        if score > melhor_score:
+            melhor_score = score
+            melhor_bloco = bloco
+
+    return melhor_bloco, melhor_score
+
+
+def campo_no_card(valor, texto_card, campo=""):
+    if not valor:
+        return True
+
+    esperado = texto_comparacao(valor)
+    texto = texto_comparacao(texto_card)
+    tokens = set(texto.split())
+
+    equivalencias = {
+        "KG": {"KG", "QUILO"},
+        "QUILO": {"KG", "QUILO"},
+        "UNIDADE": {"UNIDADE", "UNID"},
+        "PACOTE": {"PACOTE", "PCT"},
+        "BANDEJA": {"BANDEJA", "BDJ"},
+        "CAIXA": {"CAIXA"},
+        "POTE": {"POTE"},
+        "FRASCO": {"FRASCO"},
+        "VIDRO": {"VIDRO"},
+        "LATA": {"LATA"},
+        "PET": {"PET"},
+        "SACHE": {"SACHE"},
+        "TABLETE": {"TABLETE"},
+    }
+
+    if esperado in equivalencias:
+        return bool(equivalencias[esperado] & tokens)
+
+    # Pesos e volumes pequenos sofrem confusões previsíveis entre G/6 e L/1.
+    compacto_esperado = esperado.replace(" ", "")
+    compacto_texto = texto.replace(" ", "")
+    variantes = {
+        compacto_esperado,
+        compacto_esperado.replace("G", "6"),
+        compacto_esperado.replace("L", "1"),
+    }
+    return any(variante and variante in compacto_texto for variante in variantes)
+
+
 def classificar_descricao(score, limiar_ok=85):
     if score >= limiar_ok:
         return "OK"
@@ -426,9 +518,235 @@ def definir_motivo_principal(score, status_descricao, apontamentos):
     return ""
 
 
+def normalizar_codigo(valor):
+    texto = str(valor).strip()
+    return texto[:-2] if texto.endswith(".0") else texto
+
+
+def normalizar_preco_lido(valor):
+    if valor is None or str(valor).strip() == "":
+        return ""
+    achado = re.search(r"(\d{1,3})\D?(\d{2})", str(valor))
+    if not achado:
+        return ""
+    return f"{int(achado.group(1))},{achado.group(2)}"
+
+
+def conferir_com_visao(df, paginas):
+    """Compara os campos estruturados lidos visualmente, sem inferir ausências."""
+    resultados = []
+    cards = []
+    usados = set()
+
+    for pagina in paginas:
+        for indice, card in enumerate(pagina.get("cards_visao", [])):
+            cards.append((pagina["pagina"], indice, card))
+
+    por_codigo = {}
+    for pagina, indice, card in cards:
+        codigo = normalizar_codigo(card.get("codigo_planilha"))
+        if codigo and codigo.lower() != "none":
+            por_codigo.setdefault(codigo, []).append((pagina, indice, card))
+
+    for _, row in df.iterrows():
+        tipo_item = row["Tipo"]
+        codigo = normalizar_codigo(row["Código"])
+        candidatos = por_codigo.get(codigo, [])
+        candidato = max(
+            candidatos,
+            key=lambda item: float(item[2].get("confianca", 0)),
+            default=None,
+        )
+
+        if candidato is None:
+            # Recupera apenas correspondências textuais fortes que vieram sem código.
+            alternativas = []
+            for pagina, indice, card in cards:
+                if (pagina, indice) in usados:
+                    continue
+                score_alt = fuzz.token_set_ratio(
+                    texto_comparacao(row["Descrição"]),
+                    texto_comparacao(card.get("descricao_arte", "")),
+                )
+                if score_alt >= 88:
+                    alternativas.append((score_alt, pagina, indice, card))
+            if alternativas:
+                _, pagina_card, indice_card, card = max(alternativas)
+                candidato = (pagina_card, indice_card, card)
+
+        base = {
+            "Aba": row["Aba"],
+            "Tipo": tipo_item,
+            "Código": row["Código"],
+            "Descrição": row["Descrição"],
+            "Embalagem": row["Embalagem"],
+            "Unid.Medida": row["Unid.Medida"],
+            "Preço Regular XLSX": row["preco_regular_fmt"],
+            "CooperMais XLSX": row["coopermais_fmt"],
+        }
+
+        if tipo_item == "EXCLUÍDO":
+            resultados.append({
+                "Status": "EXCLUÍDO", "Motivo principal": "Produto excluído",
+                "Página provável": "-", **base,
+                "Regra especial": "Produto listado no bloco EXCLUÍDOS",
+                "Confiança": "-", "Descrição status": "NÃO APLICÁVEL",
+                "Unidade/embalagem status": "NÃO APLICÁVEL",
+                "Preço regular status": "NÃO APLICÁVEL",
+                "CooperMais status": "NÃO APLICÁVEL", "Preço regular OCR": "-",
+                "CooperMais OCR": "-", "Preço reconhecido OCR": "-",
+                "Evidências": "Produto excluído da conferência", "Score card": "-",
+                "Score descrição": "-", "Apontamentos": "Produto excluído",
+            })
+            continue
+
+        if candidato is None:
+            resultados.append({
+                "Status": "AUSENTE",
+                "Motivo principal": "Produto da planilha não localizado na arte",
+                "Página provável": "-", **base,
+                "Regra especial": "Conferência híbrida OCR + visão",
+                "Confiança": "Alta", "Descrição status": "AUSENTE",
+                "Unidade/embalagem status": "NÃO APLICÁVEL",
+                "Preço regular status": "NÃO APLICÁVEL",
+                "CooperMais status": "NÃO APLICÁVEL", "Preço regular OCR": "",
+                "CooperMais OCR": "", "Preço reconhecido OCR": "",
+                "Evidências": "Nenhum card visual compatível nas páginas enviadas",
+                "Score card": "-", "Score descrição": "-",
+                "Apontamentos": "Produto da planilha ausente na arte",
+            })
+            continue
+
+        pagina_card, indice_card, card = candidato
+        usados.add((pagina_card, indice_card))
+        descricao_arte = card.get("descricao_arte", "")
+        score = fuzz.token_set_ratio(
+            texto_comparacao(row["Descrição"]), texto_comparacao(descricao_arte)
+        )
+        texto_unidade_arte = " ".join(
+            str(valor) for valor in (
+                card.get("embalagem_arte"), card.get("unidade_arte")
+            ) if valor
+        )
+        embalagem_ok = campo_no_card(row["embalagem_limpa"], texto_unidade_arte)
+        unidade_ok = campo_no_card(row["unidade_limpa"], texto_unidade_arte)
+        unidade_completa_ok = embalagem_ok and unidade_ok
+
+        regular_esperado = row["preco_regular_fmt"]
+        cooper_esperado = row["coopermais_fmt"]
+        regular_arte = normalizar_preco_lido(card.get("preco_regular_arte"))
+        cooper_arte = normalizar_preco_lido(card.get("preco_coopermais_arte"))
+
+        desc_status = "OK" if score >= 88 else ("REVISAR" if score >= 72 else "DIVERGENTE")
+        unidade_status = "OK" if unidade_completa_ok else "DIVERGENTE"
+
+        def status_preco(esperado, observado):
+            if not esperado:
+                return "NÃO EXIGIDO"
+            if not observado:
+                return "AUSENTE"
+            return "OK" if esperado == observado else "DIVERGENTE"
+
+        regular_status = status_preco(regular_esperado, regular_arte)
+        cooper_status = status_preco(cooper_esperado, cooper_arte)
+        apontamentos = []
+        divergencias = []
+        incompletos = []
+
+        if desc_status == "DIVERGENTE":
+            divergencias.append("descrição")
+            apontamentos.append(f"Descrição divergente: arte '{descricao_arte}'")
+        elif desc_status == "REVISAR":
+            apontamentos.append("Descrição visual com correspondência parcial")
+        if not unidade_completa_ok:
+            divergencias.append("unidade/embalagem")
+            apontamentos.append(
+                f"Unidade/embalagem divergente: arte '{texto_unidade_arte or 'ausente'}'"
+            )
+        for nome, esperado, observado, status in (
+            ("Preço regular", regular_esperado, regular_arte, regular_status),
+            ("CooperMais", cooper_esperado, cooper_arte, cooper_status),
+        ):
+            if status == "DIVERGENTE":
+                divergencias.append(nome.lower())
+                apontamentos.append(f"{nome} divergente: planilha {esperado} | arte {observado}")
+            elif status == "AUSENTE":
+                incompletos.append(nome.lower())
+                apontamentos.append(f"{nome} ausente na arte: esperado {esperado}")
+
+        confianca_num = float(card.get("confianca", 0))
+        if divergencias:
+            status_final = "DIVERGÊNCIA"
+            motivo = "Campos divergentes: " + ", ".join(divergencias)
+        elif incompletos:
+            status_final = "INCOMPLETO"
+            motivo = "Campos ausentes: " + ", ".join(incompletos)
+        elif desc_status == "REVISAR" or confianca_num < 0.72:
+            status_final = "REVISAR"
+            motivo = "Leitura visual requer confirmação"
+        else:
+            status_final = "OK"
+            motivo = "Produto incluído conferido" if tipo_item == "INCLUÍDO" else ""
+
+        resultados.append({
+            "Status": status_final, "Motivo principal": motivo,
+            "Página provável": pagina_card, **base,
+            "Regra especial": "Conferência híbrida OCR + visão",
+            "Confiança": "Alta" if confianca_num >= 0.85 else ("Média" if confianca_num >= 0.72 else "Baixa"),
+            "Descrição status": desc_status,
+            "Unidade/embalagem status": unidade_status,
+            "Preço regular status": regular_status,
+            "CooperMais status": cooper_status,
+            "Preço regular OCR": regular_arte,
+            "CooperMais OCR": cooper_arte,
+            "Preço reconhecido OCR": cooper_arte or regular_arte,
+            "Evidências": f"Card transcrito visualmente; descrição {score:.1f}%",
+            "Score card": round(confianca_num * 100, 2),
+            "Score descrição": round(score, 2),
+            "Apontamentos": "; ".join(apontamentos),
+        })
+
+    codigos_grade = {normalizar_codigo(valor) for valor in df["Código"]}
+    for pagina_card, indice_card, card in cards:
+        if (pagina_card, indice_card) in usados:
+            continue
+        codigo_card = normalizar_codigo(card.get("codigo_planilha"))
+        if codigo_card in codigos_grade:
+            continue
+        resultados.append({
+            "Status": "SEM BASE",
+            "Motivo principal": "Card encontrado sem correspondência nas planilhas",
+            "Página provável": pagina_card, "Aba": "-", "Tipo": "SEM BASE",
+            "Código": codigo_card if codigo_card.lower() != "none" else "-",
+            "Descrição": card.get("descricao_arte", "Card não identificado"),
+            "Embalagem": card.get("embalagem_arte") or "-",
+            "Unid.Medida": card.get("unidade_arte") or "-",
+            "Preço Regular XLSX": "-", "CooperMais XLSX": "-",
+            "Regra especial": "Card adicional identificado visualmente",
+            "Confiança": "Alta" if float(card.get("confianca", 0)) >= 0.85 else "Média",
+            "Descrição status": "SEM BASE", "Unidade/embalagem status": "NÃO APLICÁVEL",
+            "Preço regular status": "NÃO APLICÁVEL", "CooperMais status": "NÃO APLICÁVEL",
+            "Preço regular OCR": normalizar_preco_lido(card.get("preco_regular_arte")),
+            "CooperMais OCR": normalizar_preco_lido(card.get("preco_coopermais_arte")),
+            "Preço reconhecido OCR": normalizar_preco_lido(card.get("preco_coopermais_arte")),
+            "Evidências": "Card transcrito sem item correspondente na grade",
+            "Score card": round(float(card.get("confianca", 0)) * 100, 2),
+            "Score descrição": "-",
+            "Apontamentos": "Confirmar se o produto deveria constar nas planilhas",
+        })
+
+    return pd.DataFrame(resultados)
+
+
 def conferir(df, paginas, tipo_documento="PDF"):
+    if tipo_documento == "JPEG" and any(
+        pagina.get("modo_visao") for pagina in paginas
+    ):
+        return conferir_com_visao(df, paginas)
+
     resultados = []
     modo_ocr = tipo_documento == "JPEG"
+    blocos_usados = set()
 
     for _, row in df.iterrows():
         tipo_item = row["Tipo"]
@@ -516,40 +834,98 @@ def conferir(df, paginas, tipo_documento="PDF"):
         confianca = ""
         preco_reconhecido_ocr = ""
         evidencias = []
+        status_campo_descricao = status_descricao
+        status_campo_unidade = "OK" if unidade_ok and embalagem_ok else "NÃO ENCONTRADO"
+        status_preco_regular = "OK" if preco_regular_ok or not preco_regular else "NÃO ENCONTRADO"
+        status_preco_coopermais = "OK" if coopermais_ok or not coopermais else "NÃO ENCONTRADO"
+        preco_regular_ocr = ""
+        preco_coopermais_ocr = ""
+        score_card = "-"
 
         if modo_ocr:
             preco_principal = coopermais if coopermais else preco_regular
-            precos_promocionais = set(dados_pagina.get("precos_promocionais", []))
-            preco_principal_ok = preco_principal in precos_promocionais
+            bloco, score_card_num = encontrar_bloco_produto(descricao, dados_pagina)
+            score_card = round(score_card_num, 2)
 
-            if score >= 80:
-                evidencias.append(f"Descrição reconhecida ({score:.1f}%)")
-            elif score >= 60:
-                evidencias.append(f"Descrição parcial ({score:.1f}%)")
-
-            if preco_principal_ok:
-                preco_reconhecido_ocr = preco_principal
-                evidencias.append(f"Preço exato reconhecido ({preco_principal})")
-
-            if not preco_principal_ok:
-                apontamentos.append("Preço principal não reconhecido pelo OCR")
-
-            if status_descricao == "DIVERGÊNCIA":
-                status_final = "DIVERGÊNCIA"
-                motivo_principal = "Produto não reconhecido nas imagens JPEG"
-                confianca = "Baixa"
-            elif status_descricao == "REVISAR" or not preco_principal_ok:
-                status_final = "REVISAR"
-                motivo_principal = (
-                    "Revisar descrição reconhecida pelo OCR"
-                    if status_descricao == "REVISAR"
-                    else "Revisar preço não reconhecido pelo OCR"
-                )
-                confianca = "Média" if score >= 80 else "Baixa"
+            if bloco is None or score < 55 or score_card_num < 40:
+                status_final = "AUSENTE"
+                motivo_principal = "Produto da planilha não localizado na arte"
+                confianca = "Alta" if score < 45 else "Média"
+                status_campo_descricao = "AUSENTE"
+                status_campo_unidade = "NÃO APLICÁVEL"
+                status_preco_regular = "NÃO APLICÁVEL"
+                status_preco_coopermais = "NÃO APLICÁVEL"
+                apontamentos.append("Produto da planilha ausente na arte")
             else:
-                status_final = "OK"
-                motivo_principal = ""
-                confianca = "Alta"
+                blocos_usados.add((pagina, id(bloco)))
+                texto_card = limpar_texto(bloco.get("texto", ""))
+                precos_promocionais = set(bloco.get("precos", []))
+                precos_card = set(bloco.get("precos_card", [])) | precos_promocionais
+                descricao_ok = score_card_num >= 65
+                embalagem_ok_card = campo_no_card(embalagem, texto_card, "embalagem")
+                unidade_ok_card = campo_no_card(unidade, texto_card, "unidade")
+                unidade_completa_ok = embalagem_ok_card and unidade_ok_card
+                coopermais_ok_card = not coopermais or coopermais in precos_promocionais
+                regular_ok_card = (
+                    not preco_regular
+                    or preco_regular in precos_card
+                    or (preco_regular == coopermais and coopermais_ok_card)
+                )
+
+                status_campo_descricao = "OK" if descricao_ok else "REVISAR"
+                status_campo_unidade = "OK" if unidade_completa_ok else "DIVERGENTE"
+                status_preco_regular = "OK" if regular_ok_card else "AUSENTE"
+                status_preco_coopermais = "OK" if coopermais_ok_card else "DIVERGENTE"
+                preco_regular_ocr = ", ".join(
+                    sorted(set(bloco.get("precos_regulares", [])))
+                )
+                preco_coopermais_ocr = ", ".join(sorted(precos_promocionais))
+
+                evidencias.append(f"Descrição do card ({score_card_num:.1f}%)")
+                if coopermais_ok_card and coopermais:
+                    preco_reconhecido_ocr = coopermais
+                    evidencias.append(f"CooperMais exato ({coopermais})")
+                if regular_ok_card and preco_regular:
+                    evidencias.append(f"Regular exato ({preco_regular})")
+
+                if not descricao_ok:
+                    apontamentos.append("Descrição do card com baixa confiança")
+                if not unidade_completa_ok:
+                    apontamentos.append(
+                        f"Unidade/embalagem divergente: esperado {embalagem} {unidade}".strip()
+                    )
+                if not regular_ok_card and preco_regular:
+                    apontamentos.append(f"Preço regular ausente: esperado {preco_regular}")
+                if not coopermais_ok_card and coopermais:
+                    observado = ", ".join(sorted(precos_promocionais)) or "não reconhecido"
+                    apontamentos.append(
+                        f"Preço CooperMais divergente: esperado {coopermais} | arte {observado}"
+                    )
+
+                if not descricao_ok:
+                    status_final = "REVISAR"
+                    motivo_principal = "Revisar descrição reconhecida no card"
+                    confianca = "Baixa"
+                elif not unidade_completa_ok:
+                    status_final = "DIVERGÊNCIA"
+                    motivo_principal = "Unidade ou embalagem divergente"
+                    confianca = "Alta"
+                elif not coopermais_ok_card:
+                    status_final = "DIVERGÊNCIA" if precos_promocionais else "REVISAR"
+                    motivo_principal = (
+                        "Preço CooperMais divergente"
+                        if precos_promocionais
+                        else "Preço CooperMais não reconhecido"
+                    )
+                    confianca = "Alta" if precos_promocionais else "Baixa"
+                elif not regular_ok_card:
+                    status_final = "INCOMPLETO"
+                    motivo_principal = "Preço regular ausente no card"
+                    confianca = "Média"
+                else:
+                    status_final = "OK"
+                    motivo_principal = ""
+                    confianca = "Alta"
         else:
             if not unidade_ok:
                 apontamentos.append("Unidade de medida não encontrada na página do produto")
@@ -608,11 +984,58 @@ def conferir(df, paginas, tipo_documento="PDF"):
                 )
             ),
             "Confiança": confianca,
+            "Descrição status": status_campo_descricao,
+            "Unidade/embalagem status": status_campo_unidade,
+            "Preço regular status": status_preco_regular,
+            "CooperMais status": status_preco_coopermais,
+            "Preço regular OCR": preco_regular_ocr,
+            "CooperMais OCR": preco_coopermais_ocr,
             "Preço reconhecido OCR": preco_reconhecido_ocr,
             "Evidências": "; ".join(evidencias),
+            "Score card": score_card,
             "Score descrição": round(score, 2),
             "Apontamentos": "; ".join(apontamentos)
         })
+
+    if modo_ocr:
+        for dados_pagina in paginas:
+            for bloco in dados_pagina.get("blocos_promocionais", []):
+                chave = (dados_pagina["pagina"], id(bloco))
+                texto_card = limpar_texto(bloco.get("texto", ""))
+                palavras = re.findall(r"[A-ZÀ-Ü]{3,}", texto_card)
+                if (
+                    chave in blocos_usados
+                    or not bloco.get("precos")
+                    or len(palavras) < 2
+                ):
+                    continue
+
+                resultados.append({
+                    "Status": "SEM BASE",
+                    "Motivo principal": "Card encontrado sem correspondência nas planilhas",
+                    "Página provável": dados_pagina["pagina"],
+                    "Aba": "-",
+                    "Tipo": "SEM BASE",
+                    "Código": "-",
+                    "Descrição": " ".join(palavras[:12]),
+                    "Embalagem": "-",
+                    "Unid.Medida": "-",
+                    "Preço Regular XLSX": "-",
+                    "CooperMais XLSX": "-",
+                    "Regra especial": "Card adicional detectado por OCR",
+                    "Confiança": "Média",
+                    "Descrição status": "SEM BASE",
+                    "Unidade/embalagem status": "NÃO APLICÁVEL",
+                    "Preço regular status": "NÃO APLICÁVEL",
+                    "CooperMais status": "NÃO APLICÁVEL",
+                    "Preço regular OCR": ", ".join(bloco.get("precos_regulares", [])),
+                    "CooperMais OCR": ", ".join(bloco.get("precos", [])),
+                    "Preço reconhecido OCR": ", ".join(bloco.get("precos", [])),
+                    "Evidências": "Card com descrição e preço, sem item compatível na grade",
+                    "Score card": "-",
+                    "Score descrição": "-",
+                    "Apontamentos": "Confirmar se o produto deveria constar na planilha",
+                })
 
     return pd.DataFrame(resultados)
 
@@ -622,6 +1045,12 @@ def destacar_linhas(row):
         return ["background-color: #5c1f1f"] * len(row)
     if row["Status"] == "REVISAR":
         return ["background-color: #5c4b1f"] * len(row)
+    if row["Status"] == "INCOMPLETO":
+        return ["background-color: #59451a"] * len(row)
+    if row["Status"] == "AUSENTE":
+        return ["background-color: #4d2738"] * len(row)
+    if row["Status"] == "SEM BASE":
+        return ["background-color: #34305c"] * len(row)
     if row["Status"] == "EXCLUÍDO":
         return ["background-color: #3a3a3a"] * len(row)
     return [""] * len(row)
@@ -632,7 +1061,9 @@ def gerar_excel(resultado, ignorados, metricas, usuario, somente_alertas=False):
 
     if somente_alertas:
         resultado_exportar = resultado[
-            resultado["Status"].isin(["REVISAR", "DIVERGÊNCIA"])
+            resultado["Status"].isin(
+                ["REVISAR", "DIVERGÊNCIA", "INCOMPLETO", "AUSENTE", "SEM BASE"]
+            )
         ].copy()
     else:
         resultado_exportar = resultado.copy()
@@ -646,6 +1077,9 @@ def gerar_excel(resultado, ignorados, metricas, usuario, somente_alertas=False):
             ["Conferidos", metricas["total"]],
             ["OK", metricas["ok"]],
             ["Revisar", metricas["revisar"]],
+            ["Incompletos", metricas.get("incompletos", 0)],
+            ["Ausentes", metricas.get("ausentes", 0)],
+            ["Sem base", metricas.get("sem_base", 0)],
             ["Divergências", metricas["divergencias"]],
             ["Excluídos", metricas["excluidos"]],
             ["Incluídos", metricas["incluidos"]],
@@ -694,6 +1128,8 @@ def gerar_excel(resultado, ignorados, metricas, usuario, somente_alertas=False):
                 worksheet.set_row(row_num, None, erro_format)
             elif status == "REVISAR":
                 worksheet.set_row(row_num, None, revisar_format)
+            elif status in ("INCOMPLETO", "AUSENTE"):
+                worksheet.set_row(row_num, None, revisar_format)
             elif status == "EXCLUÍDO":
                 worksheet.set_row(row_num, None, excluido_format)
 
@@ -717,6 +1153,9 @@ def salvar_historico(usuario, xlsx_nome, pdf_nome, metricas):
             "itens_grade": metricas["total_antes"],
             "ok": metricas["ok"],
             "revisar": metricas["revisar"],
+            "incompletos": metricas.get("incompletos", 0),
+            "ausentes": metricas.get("ausentes", 0),
+            "sem_base": metricas.get("sem_base", 0),
             "divergencias": metricas["divergencias"],
             "excluidos": metricas["excluidos"],
             "incluidos": metricas["incluidos"]
@@ -783,11 +1222,16 @@ if pagina == "📋 Histórico":
     st.stop()
 
 
-xlsx_file = None
+xlsx_files = None
 tabloide_files = None
 
 if pagina == "🏠 Conferência":
-    xlsx_file = st.file_uploader("Selecione a grade de ofertas XLSX", type=["xlsx"])
+    xlsx_files = st.file_uploader(
+        "Selecione uma ou mais grades de ofertas XLSX",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        help="Você pode combinar as planilhas da frente e do verso na mesma conferência.",
+    )
     tabloide_files = st.file_uploader(
         "Selecione o tabloide em PDF ou JPEG",
         type=["pdf", "jpg", "jpeg"],
@@ -798,11 +1242,45 @@ if pagina == "🏠 Conferência":
         )
     )
 
+    modo_conferencia = st.radio(
+        "Modo de leitura para imagens JPEG",
+        [
+            "Híbrido confiável (OCR + visão inteligente)",
+            "Somente OCR local",
+        ],
+        help=(
+            "O modo híbrido é o recomendado: ele transcreve cada card de forma "
+            "estruturada e usa o OCR local como apoio. O modo local não consome API, "
+            "mas tende a deixar mais itens para revisão."
+        ),
+    )
+    usar_visao = modo_conferencia.startswith("Híbrido")
+    chave_openai, modelo_openai = obter_configuracao_openai()
+    if usar_visao:
+        if chave_openai:
+            st.caption(f"Leitura visual configurada com o modelo {modelo_openai}.")
+        else:
+            st.info(
+                "Para usar o modo híbrido, configure `openai.api_key` nos Secrets "
+                "do Streamlit. O modo somente OCR continua disponível sem essa chave."
+            )
+
     if st.button("Conferir tabloide"):
-        if not xlsx_file or not tabloide_files:
+        if not xlsx_files or not tabloide_files:
             st.warning("Envie o XLSX e o tabloide em PDF ou JPEG para iniciar a conferência.")
         else:
             try:
+                extensoes_enviadas = {
+                    os.path.splitext(arquivo.name)[1].lower()
+                    for arquivo in tabloide_files
+                }
+                jpeg_enviado = bool(extensoes_enviadas & {".jpg", ".jpeg"})
+                if usar_visao and jpeg_enviado and not chave_openai:
+                    raise ValueError(
+                        "Configure [openai] api_key nos Secrets ou selecione "
+                        "'Somente OCR local'."
+                    )
+
                 with st.spinner("Lendo XLSX..."):
                     (
                         df,
@@ -810,12 +1288,16 @@ if pagina == "🏠 Conferência":
                         total_ignorados,
                         ignorados,
                         modelo_planilha
-                    ) = carregar_xlsx(xlsx_file)
+                    ) = carregar_planilhas(xlsx_files)
 
-                st.success(f"Planilha reconhecida: {modelo_planilha}")
+                st.success("Planilhas reconhecidas: " + " | ".join(modelo_planilha))
 
                 with st.spinner("Lendo o tabloide e reconhecendo os textos..."):
-                    paginas, tipo_documento = carregar_documento(tabloide_files)
+                    paginas, tipo_documento = carregar_documento(
+                        tabloide_files,
+                        df=df,
+                        usar_visao=usar_visao and jpeg_enviado,
+                    )
 
                 if tipo_documento == "PDF":
                     tabloide_files[0].seek(0)
@@ -845,6 +1327,9 @@ if pagina == "🏠 Conferência":
             total = len(resultado)
             ok = len(resultado[resultado["Status"] == "OK"])
             revisar = len(resultado[resultado["Status"] == "REVISAR"])
+            incompletos = len(resultado[resultado["Status"] == "INCOMPLETO"])
+            ausentes = len(resultado[resultado["Status"] == "AUSENTE"])
+            sem_base = len(resultado[resultado["Status"] == "SEM BASE"])
             divergencias = len(resultado[resultado["Status"] == "DIVERGÊNCIA"])
             excluidos = len(resultado[resultado["Status"] == "EXCLUÍDO"])
             incluidos = len(resultado[resultado["Tipo"] == "INCLUÍDO"])
@@ -857,6 +1342,9 @@ if pagina == "🏠 Conferência":
                 "total": total,
                 "ok": ok,
                 "revisar": revisar,
+                "incompletos": incompletos,
+                "ausentes": ausentes,
+                "sem_base": sem_base,
                 "divergencias": divergencias,
                 "excluidos": excluidos,
                 "incluidos": incluidos
@@ -880,7 +1368,7 @@ if pagina == "🏠 Conferência":
 
             salvar_historico(
                 st.session_state.usuario,
-                xlsx_file.name if xlsx_file else "",
+                ", ".join(arquivo.name for arquivo in xlsx_files),
                 ", ".join(arquivo.name for arquivo in tabloide_files),
                 st.session_state.metricas
             )
@@ -891,16 +1379,20 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
     ignorados = st.session_state.ignorados
     metricas = st.session_state.metricas
 
-    col1, col2, col3, col4, col5, col6, col7, col8 = st.columns(8)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col7, col8, col9, col10, col11 = st.columns(5)
 
     col1.metric("Itens na grade", metricas["total_antes"])
     col2.metric("Internos ignorados", metricas["total_ignorados"])
     col3.metric("Conferidos", metricas["total"])
     col4.metric("OK", metricas["ok"])
     col5.metric("Revisar", metricas["revisar"])
-    col6.metric("Divergências", metricas["divergencias"])
-    col7.metric("Excluídos", metricas["excluidos"])
-    col8.metric("Incluídos", metricas["incluidos"])
+    col6.metric("Incompletos", metricas.get("incompletos", 0))
+    col7.metric("Ausentes", metricas.get("ausentes", 0))
+    col8.metric("Sem base", metricas.get("sem_base", 0))
+    col9.metric("Divergências", metricas["divergencias"])
+    col10.metric("Excluídos", metricas["excluidos"])
+    col11.metric("Incluídos", metricas["incluidos"])
 
     if st.session_state.ocr_diagnostico is not None:
         diagnostico = st.session_state.ocr_diagnostico
@@ -929,7 +1421,7 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
         "Visualização",
         [
             "Somente divergências",
-            "Revisar + divergências",
+            "Todos os pontos de atenção",
             "Excluídos",
             "Incluídos",
             "Todos os produtos"
@@ -939,8 +1431,12 @@ if pagina == "🏠 Conferência" and st.session_state.resultado is not None:
 
     if modo_visualizacao == "Somente divergências":
         tabela = resultado[resultado["Status"] == "DIVERGÊNCIA"]
-    elif modo_visualizacao == "Revisar + divergências":
-        tabela = resultado[resultado["Status"].isin(["REVISAR", "DIVERGÊNCIA"])]
+    elif modo_visualizacao == "Todos os pontos de atenção":
+        tabela = resultado[
+            resultado["Status"].isin(
+                ["REVISAR", "DIVERGÊNCIA", "INCOMPLETO", "AUSENTE", "SEM BASE"]
+            )
+        ]
     elif modo_visualizacao == "Excluídos":
         tabela = resultado[resultado["Status"] == "EXCLUÍDO"]
     elif modo_visualizacao == "Incluídos":

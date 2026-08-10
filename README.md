@@ -1,43 +1,95 @@
-# Tabloide Checker
+# Tabloide Checker 2.0
 
-Conferência automática de uma grade de ofertas XLSX com tabloides em PDF ou
-imagens JPEG/JPG.
+Conferência de grades de ofertas XLSX com tabloides em PDF ou imagens
+JPEG/JPG. Para JPEG, a versão 2.0 oferece um modo híbrido que combina OCR local
+e leitura visual estruturada.
 
-## Modelos de planilha aceitos
+## O que é validado
 
-- Modelo tradicional, com as abas `Agência` e/ou `FLV`
-- Modelo `Tabloide Digital`, com os campos `Descritivo Marketing`, `Preço` e
-  `Oferta`
+Cada card é conferido campo a campo:
 
-O modelo é identificado automaticamente no envio. No formato Tabloide Digital,
-o descritivo de marketing é usado como descrição principal, com a descrição de
-cadastro como alternativa quando o primeiro estiver vazio.
+- descrição do produto;
+- unidade de medida e embalagem;
+- preço regular;
+- preço CooperMais.
 
-Quando a coluna `Principal` estiver presente, somente os registros marcados
-como principais serão conferidos. As demais linhas são tratadas como variações
-internas do mesmo produto e não entram individualmente no relatório.
+O sistema também aponta produtos da planilha ausentes na arte e cards da arte
+sem correspondência nas planilhas.
 
-## Formatos aceitos
+Os resultados possíveis são:
 
-- Grade de ofertas: `.xlsx`
-- Tabloide: um arquivo `.pdf` ou uma ou mais imagens `.jpg`/`.jpeg`
+- `OK`: todos os campos exigidos foram confirmados;
+- `DIVERGÊNCIA`: existe um valor visível diferente da planilha;
+- `INCOMPLETO`: um campo exigido pela planilha não aparece na arte;
+- `REVISAR`: a leitura não teve confiança suficiente para aprovação automática;
+- `AUSENTE`: o produto da planilha não foi localizado;
+- `SEM BASE`: existe um card na arte que não está nas planilhas;
+- `EXCLUÍDO`: item marcado como excluído no modelo legado.
 
-Ao enviar várias imagens JPEG, cada arquivo é tratado como uma página. A ordem
-de seleção dos arquivos define a numeração utilizada no relatório e na prévia.
+## Planilhas aceitas
 
-As imagens JPEG são lidas por OCR. Em uma instalação local, o Tesseract OCR
-precisa estar instalado no sistema e disponível no `PATH`, com os idiomas
-português e inglês. No Streamlit Community Cloud, o arquivo `packages.txt`
-incluído no projeto instala esses componentes automaticamente.
+É possível enviar uma ou mais planilhas na mesma conferência. Os modelos são
+identificados automaticamente:
 
-A leitura de JPEG combina OCR de descrições com uma etapa adaptativa dedicada
-às faixas verdes de preço. A partir da versão 1.8, faixas que ocupam apenas uma
-pequena parte da largura da página também são detectadas, e cada preço passa por
-mais de um tratamento de contraste antes da leitura.
+- tradicional, com abas `Agência` e/ou `FLV`;
+- `Tabloide Digital`;
+- lista simples `Tabloide Marketing`, sem cabeçalho;
+- `Lista de Ofertas`, com cabeçalho iniciado por `Cód. Produto`.
 
-O resultado `OK` exige duas evidências: descrição reconhecida com score mínimo
-e preço principal exato identificado na página provável. Quando uma das duas
-evidências não é conclusiva, o item permanece como `REVISAR`; o sistema não
-transforma incerteza de OCR em divergência confirmada. O relatório também exibe
-as colunas `Confiança`, `Preço reconhecido OCR` e `Evidências`, além de um
-diagnóstico de cobertura dos preços na tela.
+No modelo `Tabloide Digital`, o descritivo de marketing é usado como descrição
+principal. Quando a coluna `Principal` existe, somente os registros marcados
+como principais entram na conferência.
+
+## Modos para JPEG
+
+### Híbrido confiável (recomendado)
+
+Faz uma leitura estruturada da página inteira por visão e mantém o OCR local
+como apoio. A planilha é fornecida ao leitor visual somente para associar o
+card ao código correto: preço, descrição e unidade precisam ser lidos na
+imagem, e campos ilegíveis ou ausentes retornam vazios.
+
+Esse modo usa a API da OpenAI e gera consumo na conta correspondente. Configure
+os Secrets do Streamlit:
+
+```toml
+[openai]
+api_key = "sk-..."
+modelo = "gpt-5.6"
+```
+
+Também é possível usar as variáveis `OPENAI_API_KEY` e
+`OPENAI_VISION_MODEL`.
+
+### Somente OCR local
+
+Não usa API externa. É útil como alternativa, mas textos e preços pequenos em
+artes densas podem permanecer como `REVISAR`. O Tesseract precisa estar no
+`PATH`, com português e inglês. No Streamlit Community Cloud, o
+`packages.txt` instala os pacotes necessários.
+
+## Configuração do acesso
+
+Além da seção `openai`, mantenha nos Secrets as configurações já usadas pelo
+aplicativo:
+
+```toml
+[cookie]
+senha = "uma-chave-longa-e-secreta"
+
+[usuarios]
+usuario = "senha"
+
+[perfis]
+usuario = "ADMIN"
+```
+
+## Execução local
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+O relatório pode ser filtrado na tela e exportado para XLSX com o status e a
+evidência de cada campo.
