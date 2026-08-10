@@ -1,6 +1,5 @@
 import re
 import os
-import unicodedata
 from datetime import datetime
 from io import BytesIO
 
@@ -13,6 +12,7 @@ from rapidfuzz import fuzz
 from streamlit_cookies_manager import EncryptedCookieManager
 
 from ocr_utils import abrir_imagem_jpeg, extrair_texto_jpeg
+from planilha_utils import ler_planilha_normalizada
 
 
 st.set_page_config(
@@ -21,7 +21,7 @@ st.set_page_config(
     layout="wide"
 )
 
-VERSAO = "1.5.0"
+VERSAO = "1.6.0"
 
 
 def obter_senha_cookie():
@@ -167,18 +167,6 @@ if "documento_preview" not in st.session_state:
     st.session_state.documento_preview = None
 
 
-def remover_acentos(texto):
-    texto = str(texto)
-    texto = unicodedata.normalize("NFKD", texto)
-    return "".join(c for c in texto if not unicodedata.combining(c))
-
-
-def texto_busca(texto):
-    if pd.isna(texto):
-        return ""
-    return remover_acentos(str(texto)).upper().strip()
-
-
 def formatar_preco(valor):
     if pd.isna(valor):
         return ""
@@ -194,76 +182,8 @@ def limpar_texto(texto):
     return str(texto).replace("\n", " ").replace("  ", " ").strip().upper()
 
 
-def aplicar_tipo_blocos(df):
-    tipo_atual = "NORMAL"
-    tipos = []
-
-    for _, row in df.iterrows():
-        texto_linha = texto_busca(" ".join([str(v) for v in row.values if not pd.isna(v)]))
-
-        if "EXCLUID" in texto_linha:
-            tipo_atual = "EXCLUÍDO"
-            tipos.append("SEPARADOR")
-            continue
-
-        if "INCLUID" in texto_linha:
-            tipo_atual = "INCLUÍDO"
-            tipos.append("SEPARADOR")
-            continue
-
-        if "BOX" in texto_linha and "EXCLUID" not in texto_linha and "INCLUID" not in texto_linha:
-            tipo_atual = "NORMAL"
-            tipos.append("SEPARADOR")
-            continue
-
-        tipos.append(tipo_atual)
-
-    df["Tipo"] = tipos
-    return df
-
-
-def ler_aba_agencia(arquivo):
-    df = pd.read_excel(arquivo, sheet_name="Agência", header=2)
-    df["Aba"] = "Agência"
-    df = aplicar_tipo_blocos(df)
-    return df
-
-
-def ler_aba_flv(arquivo):
-    df_raw = pd.read_excel(arquivo, sheet_name="FLV", header=None)
-
-    df = pd.DataFrame()
-    df["Código"] = df_raw.iloc[:, 0]
-    df["Descrição"] = df_raw.iloc[:, 1]
-    df["Embalagem"] = df_raw.iloc[:, 2]
-    df["Unid.Medida"] = df_raw.iloc[:, 3]
-    df["PREÇO"] = df_raw.iloc[:, 4]
-    df["COOPERMAIS"] = df_raw.iloc[:, 5]
-    df["Aba"] = "FLV"
-
-    df = aplicar_tipo_blocos(df)
-    return df
-
-
 def carregar_xlsx(arquivo):
-    dataframes = []
-
-    try:
-        df_agencia = ler_aba_agencia(arquivo)
-        dataframes.append(df_agencia)
-    except Exception as erro:
-        st.warning(f"Aba Agência não foi lida: {erro}")
-
-    try:
-        df_flv = ler_aba_flv(arquivo)
-        dataframes.append(df_flv)
-    except Exception as erro:
-        st.warning(f"Aba FLV não foi lida: {erro}")
-
-    if len(dataframes) == 0:
-        raise Exception("Nenhuma das abas esperadas foi encontrada.")
-
-    df_original = pd.concat(dataframes, ignore_index=True)
+    df_original, modelo_planilha = ler_planilha_normalizada(arquivo)
 
     colunas = [
         "Aba",
@@ -305,7 +225,7 @@ def carregar_xlsx(arquivo):
     df["preco_regular_fmt"] = df["PREÇO"].apply(formatar_preco)
     df["coopermais_fmt"] = df["COOPERMAIS"].apply(formatar_preco)
 
-    return df, total_antes, total_ignorados, ignorados
+    return df, total_antes, total_ignorados, ignorados, modelo_planilha
 
 
 def carregar_pdf(arquivo):
@@ -786,7 +706,15 @@ if pagina == "🏠 Conferência":
         else:
             try:
                 with st.spinner("Lendo XLSX..."):
-                    df, total_antes, total_ignorados, ignorados = carregar_xlsx(xlsx_file)
+                    (
+                        df,
+                        total_antes,
+                        total_ignorados,
+                        ignorados,
+                        modelo_planilha
+                    ) = carregar_xlsx(xlsx_file)
+
+                st.success(f"Planilha reconhecida: {modelo_planilha}")
 
                 with st.spinner("Lendo o tabloide e reconhecendo os textos..."):
                     paginas, tipo_documento = carregar_documento(tabloide_files)

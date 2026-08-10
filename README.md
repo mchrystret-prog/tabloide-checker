@@ -3,6 +3,16 @@
 Conferência automática de uma grade de ofertas XLSX com tabloides em PDF ou
 imagens JPEG/JPG.
 
+## Modelos de planilha aceitos
+
+- Modelo tradicional, com as abas `Agência` e/ou `FLV`
+- Modelo `Tabloide Digital`, com os campos `Descritivo Marketing`, `Preço` e
+  `Oferta`
+
+O modelo é identificado automaticamente no envio. No formato Tabloide Digital,
+o descritivo de marketing é usado como descrição principal, com a descrição de
+cadastro como alternativa quando o primeiro estiver vazio.
+
 ## Formatos aceitos
 
 - Grade de ofertas: `.xlsx`
